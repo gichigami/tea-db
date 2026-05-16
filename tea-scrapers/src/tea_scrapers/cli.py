@@ -10,8 +10,17 @@ Exit codes (per spec §7): 0 success, 1 partial failure, 2 terminal failure.
 from __future__ import annotations
 
 import click
+import structlog
+from ulid import ULID
 
+from tea_scrapers.config import VendorConfig, get_settings, load_shopify_vendors
+from tea_scrapers.http.client import HttpClient
 from tea_scrapers.logging import configure_logging
+from tea_scrapers.sources import ShopifyScraper
+from tea_scrapers.storage.raw import JsonlWriter
+from tea_scrapers.storage.run_tracker import RunTracker
+
+_log = structlog.get_logger(__name__)
 
 
 @click.group()
@@ -45,8 +54,57 @@ def ingest_shopify(ctx: click.Context, vendor: str | None, all_vendors: bool, mo
     """Scrape Shopify products (generic scraper, vendor config in YAML)."""
     if not vendor and not all_vendors:
         raise click.UsageError("Pass either --vendor <key> or --all.")
-    click.echo("not implemented")
-    ctx.exit(0)
+
+    vendors = load_shopify_vendors()
+    if vendor:
+        if vendor not in vendors:
+            raise click.UsageError(
+                f"unknown vendor '{vendor}'. Known: {sorted(vendors)}"
+            )
+        targets = [vendors[vendor]]
+    else:
+        targets = list(vendors.values())
+
+    successes = 0
+    failures = 0
+    for target in targets:
+        try:
+            _run_one_shopify_vendor(target, mode)
+            successes += 1
+        except Exception as exc:  # noqa: BLE001 — per-vendor isolation in --all mode
+            failures += 1
+            _log.error(
+                "scrape.vendor.failed",
+                source=target.source_key,
+                error=type(exc).__name__,
+                message=str(exc),
+            )
+            # Single-vendor invocation surfaces the failure as exit 2.
+            if vendor:
+                ctx.exit(2)
+
+    if failures == 0:
+        ctx.exit(0)
+    if successes == 0:
+        ctx.exit(2)
+    ctx.exit(1)
+
+
+def _run_one_shopify_vendor(vendor: VendorConfig, mode: str) -> None:
+    """Open a single tracker+client+writer triple and drive ShopifyScraper.run()."""
+    run_id = str(ULID())
+    settings = get_settings()
+    with RunTracker(source=vendor.source_key, mode=mode, run_id=run_id) as tracker:
+        with HttpClient() as http_client:
+            with JsonlWriter(run_id=run_id, base_dir=settings.raw_data_dir) as writer:
+                scraper = ShopifyScraper(
+                    vendor=vendor,
+                    http_client=http_client,
+                    writer=writer,
+                    tracker=tracker,
+                    run_id=run_id,
+                )
+                scraper.run(mode)
 
 
 @ingest.command("steepster")
