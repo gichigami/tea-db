@@ -137,6 +137,30 @@ class Product(Base):
 
 
 class VendorProduct(Base):
+    """One vendor-side listing of a canonical :class:`Product`.
+
+    ``vendor_external_id`` is a **composite** identifier shaped like
+    ``"{shopify_product_id}:{shopify_variant_id}"`` for the Shopify
+    sources. Rationale (step-6 plan):
+
+    - One Shopify product can carry N weight variants ("50g cake", "100g
+      cake", ...). Each variant maps to a distinct silver :class:`Product`
+      row because ``weight_grams`` participates in the canonical match
+      key. If we keyed ``vendor_product`` by ``shopify_product_id`` alone,
+      we'd lose the 1:1 mapping between a variant's snapshot history and
+      its silver product row.
+    - The pair of IDs is stable across Shopify republishes of the same
+      catalog object; mutation of the *variant* ID (rare, but possible
+      when a vendor re-creates an option in their admin) is filed as a
+      §12 OQ.
+
+    The non-Shopify scheme (Steepster / TeaDB / Reddit, step 7+) is
+    deliberately not specified here — scraper-engineer documents the
+    analogous composite at that time.
+
+    Spec cross-reference: ``specs/tea_scrapers_v1_spec.md`` §8.
+    """
+
     __tablename__ = "vendor_product"
     __table_args__ = (
         UniqueConstraint("vendor_id", "vendor_external_id", name="uq_vendor_external"),

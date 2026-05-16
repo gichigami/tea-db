@@ -20,6 +20,7 @@ from tea_scrapers.config import VendorConfig, get_settings, load_shopify_vendors
 from tea_scrapers.http.client import HttpClient
 from tea_scrapers.load import BronzeLoader
 from tea_scrapers.logging import configure_logging
+from tea_scrapers.normalize import ProductDecision, SilverNormalizer
 from tea_scrapers.sources import ShopifyScraper
 from tea_scrapers.storage.raw import JsonlWriter
 from tea_scrapers.storage.run_tracker import RunTracker
@@ -185,12 +186,68 @@ def load_cmd(ctx: click.Context, since: str) -> None:
 
 
 @cli.command("normalize")
-@click.option("--since", required=True, type=str, help="UTC date YYYY-MM-DD; normalize bronze rows on/after this date.")
+@click.option(
+    "--since",
+    required=True,
+    type=str,
+    help="UTC date YYYY-MM-DD; normalize bronze rows with scraped_at on/after this date.",
+)
+@click.option(
+    "--source",
+    "source",
+    default=None,
+    type=str,
+    help="Limit to a single source key (mirrors `status --source`).",
+)
+@click.option(
+    "--batch-size",
+    "batch_size",
+    default=500,
+    type=int,
+    show_default=True,
+    help="Bronze rows per transaction.",
+)
 @click.pass_context
-def normalize_cmd(ctx: click.Context, since: str) -> None:
+def normalize_cmd(
+    ctx: click.Context, since: str, source: str | None, batch_size: int
+) -> None:
     """Run canonical-ID matching + bronze → silver normalization."""
-    click.echo("not implemented")
-    ctx.exit(0)
+    try:
+        since_date = dt.date.fromisoformat(since)
+    except ValueError as exc:
+        raise click.UsageError(f"--since must be YYYY-MM-DD: {exc}") from exc
+
+    run_id = str(ULID())
+    try:
+        with RunTracker(source="normalizer", mode="silver", run_id=run_id) as tracker:
+            normalizer = SilverNormalizer(
+                since=since_date,
+                tracker=tracker,
+                run_id=run_id,
+                source=source,
+                batch_size=batch_size,
+            )
+            stats = normalizer.run()
+    except (OperationalError, InterfaceError) as exc:
+        # Terminal DB failure — RunTracker finalizes as 'failed' before the
+        # exception propagates. Exit 2 per spec §7.
+        _log.error(
+            "normalize.terminal",
+            error=type(exc).__name__,
+            message=str(exc),
+        )
+        ctx.exit(2)
+        return
+
+    # Exit 1 if anything ambiguous or skipped showed up — operators should
+    # eyeball those before the run becomes "green" in dashboards.
+    partial = (
+        stats.parse_errors
+        + stats.insert_errors
+        + stats.skipped_unmappable
+        + stats.by_decision.get(ProductDecision.AMBIGUOUS_CREATED.value, 0)
+    )
+    ctx.exit(1 if partial > 0 else 0)
 
 
 @cli.command("status")

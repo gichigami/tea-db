@@ -564,6 +564,7 @@ CREATE TABLE producer (
     parent_brand   TEXT,
     created_at     TIMESTAMPTZ DEFAULT NOW()
 );
+CREATE INDEX idx_producer_name_trgm ON producer USING gin (canonical_name gin_trgm_ops);
 
 CREATE TABLE region (
     region_id      BIGSERIAL PRIMARY KEY,
@@ -608,6 +609,12 @@ CREATE TABLE vendor_product (
     vendor_url         TEXT,
     UNIQUE (vendor_id, vendor_external_id)
 );
+-- For Shopify sources, ``vendor_external_id`` is the composite
+-- ``"{shopify_product_id}:{shopify_variant_id}"`` so each weight variant
+-- maps to a distinct silver ``product`` row + ``vendor_product`` row.
+-- See ``VendorProduct`` docstring in ``storage/models.py`` for the full
+-- rationale (and §12 OQ for the non-Shopify scheme, to be documented when
+-- Steepster / TeaDB / Reddit land in step 7+).
 
 -- Silver fact: daily inventory/price snapshots
 CREATE TABLE product_snapshot (
@@ -787,3 +794,22 @@ Things agents should NOT do:
   3. **`tests/conftest.py::reset_session_caches()` helper.** `test_cli_terminal_failure_exit_2` reaches into `session._session_factory.cache_clear()` + `session._settings.cache_clear()` inline (with SLF001 noqa) to defeat module-level `@lru_cache` so a per-invocation `DATABASE_URL` env override actually takes effect. Works today (one consumer), but silently breaks if anyone adds another `lru_cache`d factory. Centralize.
   4. **Strengthen `test_since_filter_skips_older_partitions`.** Currently stages identical fixtures in both date partitions and asserts post-filter row count; with identical fixtures, dedup would produce the same row count even if the date filter no-op'd, so the test passes for the wrong reason. Stage a distinct fixture (different `external_id`) in the older partition and assert it's *not* in bronze.
   5. **Broader §4 (Idempotency) rewrite.** The line-193 sync in this PR fixed the stale dedup-key sentence, but §4's surrounding prose about "another file in the same partition is safe" is now better justified by hash-based dedup rather than `scraped_at`. Consolidate idempotency + dedup-key rationale into one place rather than scattered across §4 / §8. Decision owner: tech-lead.
+- **Silver normalizer follow-ups.** Filed 2026-05-16 alongside step-6 (canonical ID matcher + silver normalizer landing). All non-blocking; each pinned for the right owner at the right time.
+  1. **Non-Shopify `vendor_external_id` schemes.** Shopify uses the composite `"{shopify_product_id}:{shopify_variant_id}"` (documented in `storage/models.py::VendorProduct` docstring and §8 of this spec). Steepster / TeaDB / Reddit need their own analogous schemes when steps 7–9 land. Owner: scraper-engineer at that time. Until then, the silver normalizer assumes Shopify shape — adding a non-Shopify source requires `shopify_mapper.py` to become source-aware (or get peers).
+  2. **`variant.grams` tare-in-packaging quirk.** Codified in `shopify_mapper.py::_parse_weight_from_option` and verified against the YS-US golden record (`"100 Grams"` option → `variant.grams=125`). Future engineers may be tempted to "simplify" by trusting `variant.grams` directly; the comment in the mapper exists to prevent that. Cross-link: the unit test `test_normalize_shopify_mapper.py::test_option1_overrides_variant_grams` asserts the divergence stays.
+  3. **Currency=USD V1 hardcode.** All three current vendors quote USD; the silver fact column `product_snapshot.currency` is filled with the literal `"USD"`. Breaks the moment a non-US Shopify vendor lands (e.g. a Taiwanese / UK source). Resolution: lift to `VendorConfig.currency` and have the mapper read it. Owner: scraper-engineer at first non-USD vendor.
+  4. **Cultivar + region extraction for non-YS vendors.** YS structured tags (`Producer_*`, `Region_*`, `Cultivar_*`) drive most of `shopify_mapper.py`'s field extraction today. white2tea and Crimson Lotus emit free-form tags and short product titles; the mapper falls back to `payload.vendor` + start-of-title regex but does not extract region or cultivar at all. Deferred to ml-engineer V1.5 (LLM-driven extraction over `body_html`).
+  5. **LLM tiebreaker stub at matcher step 3.** `CanonicalMatcher.match_or_create_product` currently logs `silver_match_ambiguity` and falls through to over-create when 2+ trigram candidates cluster within 0.10 similarity. The spec §8 calls for an LLM tiebreaker here; V1 stub is conservative (over-create is recoverable, false-merge is not). Cross-link: ROADMAP step 7+ where ml-engineer picks this up.
+  6. **Tier-sweep perf.** V1's `normalize/tier.py::assign_tiers` runs one CTE-based UPDATE per normalize run, scoped to the touched product IDs. Fine at thousands of products. At V2 scale (curated catalog tier D + multi-vendor cross-product, ~100K+ products), the CTE will start to dominate; the obvious optimization is a denormalized `product.last_available_at` column maintained on snapshot insert. Decision owner: data-engineer at first slow-run signal.
+  7. **`--since` semantic divergence.** The bronze loader filters on partition date in the JSONL path (`source=.../date=YYYY-MM-DD/...`); the silver normalizer filters on the in-row `raw_product_snapshot.scraped_at::date`. Both accept `--since YYYY-MM-DD` but they mean slightly different things. Acceptable in V1 (the two values are equal in practice — `JsonlWriter` derives the partition from `scraped_at`), but document so operators don't get confused when they diverge under, say, a re-load of older partitions.
+  8. **`product.canonical_name` not UNIQUE is intentional.** The matcher key is the 4-tuple `(producer_id, harvest_year, normalized_name, weight_grams)`; canonical names can legitimately repeat across e.g. different weight variants. A comment in `canonical.py` flags this; future readers should not "fix" this by adding a unique constraint.
+  9. **Variant-id mutation on Shopify republish.** If a vendor deletes and re-creates a Shopify variant in their admin, the new variant_id is a different integer, and the silver normalizer will create a new `vendor_product` row (because `vendor_external_id` is composite of product_id + variant_id). The historical snapshot chain orphans onto the old row. Rare but possible; V1 accepts the duplication.
+  10. **Producer / region creation idempotency under multi-writer.** V1 cron is single-writer; the cache-on-write semantics in `CanonicalMatcher` (in-process dict cache + SELECT-first) would race under concurrent normalize runs. Flag if/when multi-writer becomes a real configuration.
+- **Silver normalizer polish items.** Filed 2026-05-16 in step-6 code review. Non-blocking hygiene; bundle into a single follow-up PR rather than landing in step 6.
+  1. **`canonical.py` `_trgm_initialized_sessions` late-init.** Defers `set` allocation to first method call via `hasattr` guard. Move to `__init__` next to the other dict caches.
+  2. **`canonical.py:25` docstring drift on aliases.** Claims "raw-form spellings are appended"; `_maybe_append_alias` actually stores the normalized form. Either reword the docstring or document why raw is intentionally dropped.
+  3. **`tier.py` no-snapshots branch.** Products with zero snapshots get tier `'C'` via the ELSE arm of the CASE — correct per the V1 brief (treat as never-available), but worth a one-line comment so a future reader doesn't misread it as a bug. Revisit if curated tier-D ingestion ever produces snapshot-less products.
+  4. **`silver.py` cross-batch cache survival.** `_producer_cache` / `_vendor_cache` / `_touched_product_ids` survive across batch transactions. If a batch `IntegrityError`s and rolls back, cached IDs created in that batch become stale and can FK-violate the next batch. Single-writer V1 keeps this rare; cross-link to OQ #10.
+  5. **`test_normalize_tier.py::test_long_discontinued_lands_in_tier_c` boundary brittleness.** Uses `30*30` days (~29.6 months) vs. the 24-month tier-B cutoff. Bump to `weeks=110` or `days=30*40` for a less brittle margin.
+  6. **`test_normalize_pipeline.py` row-count idiom.** Uses `len(.all())` to count rows at lines `:444+ (×6 sites)`. Should be `select(func.count()).select_from(...)` — same answer, less materialization.
+  7. **AMBIGUOUS_GAP fall-through has no dedicated test.** `test_product_two_high_similarity_candidates_reuse_via_top_ceiling` exercises the `AMBIGUOUS_TOP_CEILING` reuse path (top_sim ≥ 0.95); no test currently exercises the `AMBIGUOUS_GAP` over-create path (top_sim in [0.85, 0.95) with second candidate within 0.10). Designing inputs that land in that band requires fiddly pg_trgm-similarity-aware text construction; defer to a polish PR.
