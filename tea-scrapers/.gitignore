@@ -1,0 +1,26 @@
+# Raw JSONL output — partition tree is part of the contract (scrapers spec §3, §5)
+# but the contents are reproducible from upstream sources, so never tracked.
+data/raw/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Env / secrets
+.env
+.env.local
+
+# Build artifacts
+dist/
+build/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/

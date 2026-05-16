@@ -1,0 +1,30 @@
+# Per scrapers spec §3 — data/raw/ is gitignored but the path structure is part of the contract
+data/raw/
+
+# Local-only Claude Code settings
+.claude/settings.local.json
+
+# Python (anticipating the project skeleton)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Env / secrets
+.env
+.env.local
+
+# OS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+
+# Build artifacts
+dist/
+build/

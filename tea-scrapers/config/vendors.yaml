@@ -1,0 +1,31 @@
+# Per-vendor Shopify configuration.
+# Spec reference: specs/tea_scrapers_v1_spec.md §6.1.
+#
+# Crimson Lotus and Bitterleaf endpoints require spot-check before step 3
+# per scrapers spec §12 first bullet.
+
+shopify_vendors:
+  yunnan_sourcing_us:
+    display_name: "Yunnan Sourcing USA"
+    base_url: "https://yunnansourcing.us"
+    rate_limit_rps: 2
+
+  yunnan_sourcing_com:
+    display_name: "Yunnan Sourcing China"
+    base_url: "https://yunnansourcing.com"
+    rate_limit_rps: 2
+
+  white2tea:
+    display_name: "white2tea"
+    base_url: "https://white2tea.com"
+    rate_limit_rps: 2
+
+  crimson_lotus:
+    display_name: "Crimson Lotus Tea"
+    base_url: "https://crimsonlotustea.com"
+    rate_limit_rps: 2
+
+  bitterleaf:
+    display_name: "Bitterleaf Teas"
+    base_url: "https://bitterleafteas.com"
+    rate_limit_rps: 2
