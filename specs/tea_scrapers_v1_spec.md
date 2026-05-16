@@ -716,7 +716,7 @@ Build in this order. Each step is independently validatable before moving on.
 1. **Scaffolding**: pyproject, project structure, Postgres docker-compose, alembic init, CLI shell
 2. **Shared infra**: HttpClient with rate limit + retry, JsonlWriter with partitioning, structlog config, run tracking
 3. **Shopify scraper**: generic implementation, vendor config loader, end-to-end test against `yunnansourcing.us`
-4. **Run remaining Shopify vendors**: white2tea, Crimson Lotus, Bitterleaf, Yunnan Sourcing .com
+4. **Run remaining Shopify vendors**: white2tea, Crimson Lotus, Yunnan Sourcing .com (Bitterleaf removed in step 3 — see §12 first bullet)
 5. **Bronze loader**: JSONL → `raw_product_snapshot` with dedup via `payload_hash`
 6. **Canonical ID matcher** + **silver normalizer**: Shopify products → product/vendor_product/product_snapshot rows
 7. **Steepster scraper**: separate module, slower rate limit, HTML parsing
@@ -747,9 +747,10 @@ Things agents should NOT do:
 
 ## 12. Open Items For Implementer
 
-- Verify whether Crimson Lotus Tea and Bitterleaf Teas are actually on Shopify (`/products.json` returns valid response). If not, escalate before building generic scraper.
+- ~~Verify whether Crimson Lotus Tea and Bitterleaf Teas are actually on Shopify (`/products.json` returns valid response). If not, escalate before building generic scraper.~~ **Resolved 2026-05-16**: Crimson Lotus is Shopify (kept in `config/vendors.yaml`); Bitterleaf Teas runs WooCommerce (removed from `shopify_vendors`). A WooCommerce scraper for Bitterleaf is out of V1 scope; revisit post-V1 if community demand justifies it.
 - Verify Steepster doesn't require auth for tea/note pages. Spot-check 5 pages with no cookies.
 - Verify TeaDB has WordPress JSON API enabled (`/wp-json/wp/v2/posts` returns 200 with posts).
 - Determine initial Reddit date window (suggest last 2 years for V1; full historical can come later).
 - Decide canonical name normalization rules (case, punctuation, year position). Suggest pulling from a small ruleset in `normalize/canonical.py` with comments.
 - **Stale `scrape_run` row sweep.** `RunTracker` uses two SQLAlchemy sessions (one to insert the 'running' row, one to finalize) so a long scrape doesn't hold an open transaction. If the finalize session can't reach Postgres, the row stays 'running' indefinitely. V1 accepts this; a cron-level sweep (`UPDATE scrape_run SET status='failed', error_summary='stale: no finalize' WHERE status='running' AND started_at < now() - interval '6 hours'`) should be added in V2 ops tooling.
+- **Shopify storefront bot mitigation (placeholder User-Agent + IP reputation).** Discovered 2026-05-16 during step-4 live `--all` smoke test: after ~30 min of sustained scraping from one IP (cassette recordings + smoke), `yunnan_sourcing_com` returned 403 on page 8, and `white2tea` + `crimson_lotus` returned 403 on page 1. `yunnan_sourcing_us` succeeded. The configured default User-Agent is the `.env.example` placeholder `'tea-rec-engine/0.1 (https://github.com/gary/tea; contact: gary@...)'` with a fake repo URL and a fake contact email — almost certainly part of what the storefronts' edge (likely Cloudflare in front of Shopify) is mitigating against. Note that **cassette-replay tests are unaffected** (100/100 pytest green), and the CLI's per-vendor failure-isolation path behaved correctly (`scrape_run` rows finalized cleanly as `failed` with `terminal: ScrapeError ... returned 403`). Recommended V1.1 fix: set `USER_AGENT` env to a real contact + real repo URL; consider lowering `rate_limit_rps` for these vendors from 2 to 1; cron the scraper so traffic is paced over hours instead of bursts. Out of V1 scope to add a cloudscraper / playwright fallback per §11 ("Don't add browser automation prematurely").

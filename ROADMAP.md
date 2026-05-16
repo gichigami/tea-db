@@ -28,10 +28,10 @@ The scrapers spec is the only complete v1 spec. The rest are stubs. Drafting fol
       _Owners: scraper-engineer + data-engineer_
 - [x] **2. Shared infra** — `HttpClient` with rate limit + retry (§4), `JsonlWriter` (lives at `storage/raw.py`) with partitioning (§5), structlog config, run tracking (§8). **Spec sync (2026-05-16, scraper-engineer):** §4 now documents `HttpClient.RETRYABLE_STATUSES` (line 163) and the `scrape.request` transport-error event shape (line 176); §12 adds the stale `scrape_run` row sweep open item (line 755).
       _Owner: scraper-engineer_
-- [ ] **3. Shopify scraper** — generic implementation, vendor config loader (§6.1), end-to-end VCR test against yunnansourcing.us
+- [x] **3. Shopify scraper** — generic implementation, vendor config loader (§6.1), end-to-end VCR test against yunnansourcing.us. **Resolved (2026-05-16):** `ShopifyScraper` + `load_shopify_vendors` + CLI body landed; 14 unit tests + 15 integration tests (cassette + 10-record golden JSONL) pass; spec §12 first bullet closed (Bitterleaf is WooCommerce, removed from `vendors.yaml`); `database_url` default fixed to `postgresql+psycopg://` driver.
       _Owners: scraper-engineer + qa-engineer_
-- [ ] **4. Run remaining Shopify vendors** — white2tea, Crimson Lotus, Bitterleaf, Yunnan Sourcing .com (§6.1)
-      _Owner: scraper-engineer_
+- [x] **4. Run remaining Shopify vendors** — white2tea, Crimson Lotus, Yunnan Sourcing .com (§6.1). **Resolved (2026-05-16, scraper-engineer + qa-engineer):** 3 new cassettes + 3 new 10-record golden JSONL + 3 new integration test files landed; 45 new tests pass (15 per vendor — 5 cassette/replay + 10 golden parametrize), full suite 100/100. `yunnan_sourcing_com` cassette hand-trimmed to pages 1+2 + a synthesized empty page-3 terminator per planning §2 (artifact-level trim only — no scraper changes; §11 anti-pattern preserved). Bitterleaf intentionally absent — removed from `config/vendors.yaml` in step 3 as WooCommerce (§12 first bullet closed). Live `--all` smoke test exercised the multi-vendor failure-isolation path correctly: 1 vendor succeeded, 3 vendors 403'd (likely bot mitigation triggered by the placeholder User-Agent + sustained IP traffic); CLI handled all 4 outcomes gracefully and finalized `scrape_run` rows accordingly. The 403 finding is filed as a new §12 open item for V1.1 ops follow-up.
+      _Owners: scraper-engineer + qa-engineer_
 - [ ] **5. Bronze loader** — JSONL → `raw_product_snapshot` with `payload_hash` dedup (§8)
       _Owner: data-engineer_
 - [ ] **6. Canonical ID matcher + silver normalizer** — Shopify products → `product` / `vendor_product` / `product_snapshot` (§8). Trigram index from day 1.
