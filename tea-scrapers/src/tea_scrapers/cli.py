@@ -9,12 +9,16 @@ Exit codes (per spec §7): 0 success, 1 partial failure, 2 terminal failure.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import click
 import structlog
+from sqlalchemy.exc import InterfaceError, OperationalError
 from ulid import ULID
 
 from tea_scrapers.config import VendorConfig, get_settings, load_shopify_vendors
 from tea_scrapers.http.client import HttpClient
+from tea_scrapers.load import BronzeLoader
 from tea_scrapers.logging import configure_logging
 from tea_scrapers.sources import ShopifyScraper
 from tea_scrapers.storage.raw import JsonlWriter
@@ -140,12 +144,44 @@ def ingest_reddit(ctx: click.Context, subreddit: str, since: str) -> None:
 
 
 @cli.command("load")
-@click.option("--since", required=True, type=str, help="UTC date YYYY-MM-DD; load JSONL on/after this date.")
+@click.option(
+    "--since",
+    required=True,
+    type=str,
+    help="UTC date YYYY-MM-DD; load JSONL on/after this date.",
+)
 @click.pass_context
 def load_cmd(ctx: click.Context, since: str) -> None:
     """Load raw JSONL → bronze `raw_product_snapshot`."""
-    click.echo("not implemented")
-    ctx.exit(0)
+    try:
+        since_date = dt.date.fromisoformat(since)
+    except ValueError as exc:
+        raise click.UsageError(f"--since must be YYYY-MM-DD: {exc}") from exc
+
+    settings = get_settings()
+    run_id = str(ULID())
+    try:
+        with RunTracker(source="loader", mode="bronze", run_id=run_id) as tracker:
+            loader = BronzeLoader(
+                since=since_date,
+                raw_data_dir=settings.raw_data_dir,
+                tracker=tracker,
+                run_id=run_id,
+            )
+            stats = loader.run()
+    except (OperationalError, InterfaceError) as exc:
+        # Terminal DB failure — the RunTracker context manager already
+        # finalizes the scrape_run row as 'failed' before the exception
+        # propagates. Exit 2 per spec §7.
+        _log.error(
+            "load.terminal",
+            error=type(exc).__name__,
+            message=str(exc),
+        )
+        ctx.exit(2)
+        return
+
+    ctx.exit(1 if stats.parse_errors > 0 else 0)
 
 
 @cli.command("normalize")
