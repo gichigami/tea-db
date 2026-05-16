@@ -292,6 +292,46 @@ def test_scrape_run_row_finalized_as_success(
         assert row.finished_at is not None
 
 
+def test_golden_payloads_match_cassette(vcr_cassette, tmp_path: Path):
+    """Every golden record's payload must byte-equal the cassette's payload for the
+    same ``external_id``.
+
+    Catches a class of bug discovered in step-4 code review: a golden sampled from a
+    later/different scrape than the committed cassette captures will silently drift on
+    timestamp-like fields (``updated_at``, etc.) without any other test noticing.
+    ``test_golden_fixture_lines_parse_as_raw_records`` only checks schema;
+    ``test_payload_byte_equivalence_for_sample_product`` only checks one record. This
+    is the catch-all golden ↔ cassette equivalence gate.
+    """
+    golden_lines = _golden_lines()
+    if not golden_lines:
+        pytest.skip("no golden fixture")
+
+    raw_dir = tmp_path / "raw"
+    runner = CliRunner()
+    with vcr_cassette.use_cassette(CASSETTE), _scoped_settings_cwd(_repo_root()):
+        result = _invoke_cli(runner, raw_dir)
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
+
+    cassette_payloads = {
+        r.ingest_meta.external_id: r.payload for r in _read_records(raw_dir)
+    }
+
+    drifts: list[str] = []
+    for line in golden_lines:
+        golden = json.loads(line)
+        ext_id = golden["ingest_meta"]["external_id"]
+        if ext_id not in cassette_payloads:
+            drifts.append(f"  external_id={ext_id}: in golden but not in cassette")
+            continue
+        if golden["payload"] != cassette_payloads[ext_id]:
+            drifts.append(
+                f"  external_id={ext_id}: golden payload differs from cassette payload"
+            )
+
+    assert not drifts, "golden ↔ cassette drift:\n" + "\n".join(drifts)
+
+
 # ---------------------------------------------------------------------------
 # Golden fixture sanity
 # ---------------------------------------------------------------------------

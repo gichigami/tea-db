@@ -316,11 +316,6 @@ shopify_vendors:
     display_name: "Crimson Lotus Tea"
     base_url: "https://crimsonlotustea.com"
     rate_limit_rps: 2
-    
-  bitterleaf:
-    display_name: "Bitterleaf Teas"
-    base_url: "https://bitterleafteas.com"
-    rate_limit_rps: 2
 ```
 
 #### Output
@@ -707,6 +702,29 @@ Re-record cassettes annually or when endpoint shapes change. Don't re-record on 
 
 Maintain `tests/fixtures/golden/{source}.jsonl` with ~10 representative records per source. Use these for downstream loader/normalizer testing without re-running scrapers.
 
+#### Authoring procedure
+
+To create or regenerate a golden file, **derive it from the committed cassette**, never from an independent live scrape. A golden sampled from a different scrape than the committed cassette captures will silently drift on timestamp-like fields (`updated_at`, etc.) — the bronze loader's `payload_hash` dedup treats the drifted record as new. The `test_golden_payloads_match_cassette` test (added 2026-05-16) catches this class of bug.
+
+Canonical procedure:
+
+1. Record the cassette first: `VCR_RECORD_MODE=once pytest tests/integration/test_shopify_<vendor>.py::test_cli_full_run_against_cassette`.
+2. Trim the cassette if it exceeds ~5 MB (see the `yunnan_sourcing_com` precedent — hand-trimmed to pages 1+2 + a synthesized empty terminator).
+3. Generate the golden by **replaying the committed cassette** (not by re-scraping live):
+   - Parse the cassette YAML's first interaction (`?page=1`), `response.body.string`, and `json.loads(...)["products"]`.
+   - Take the first 10 products.
+   - Wrap each in a `RawRecord`-shaped dict with synthetic `ingest_meta`:
+     - `source`: vendor `source_key`
+     - `scraped_at`: deterministic placeholder (`"2026-05-16T00:00:00Z"`)
+     - `run_id`: deterministic placeholder (`"01HXY4Z9GOLDEN_FIXTURE_<SUFFIX>"`, e.g. `_YS_US`, `_W2T`, `_CLT`, `_YS_COM`)
+     - `endpoint`: the cassette page-1 URI
+     - `record_index`: sequential 0..9
+     - `external_id`: `str(product["id"])`
+   - `payload`: the product dict verbatim (no mutation, per §11).
+4. Verify with: `pytest tests/integration/test_shopify_<vendor>.py::test_golden_payloads_match_cassette`. Failure means the golden drifts from the cassette — fix before commit.
+
+The procedure is intentionally byte-faithful: a re-recorded cassette + re-derived golden are the only way to refresh fixtures, and they move in lockstep.
+
 ---
 
 ## 10. Implementation Sequencing
@@ -753,4 +771,13 @@ Things agents should NOT do:
 - Determine initial Reddit date window (suggest last 2 years for V1; full historical can come later).
 - Decide canonical name normalization rules (case, punctuation, year position). Suggest pulling from a small ruleset in `normalize/canonical.py` with comments.
 - **Stale `scrape_run` row sweep.** `RunTracker` uses two SQLAlchemy sessions (one to insert the 'running' row, one to finalize) so a long scrape doesn't hold an open transaction. If the finalize session can't reach Postgres, the row stays 'running' indefinitely. V1 accepts this; a cron-level sweep (`UPDATE scrape_run SET status='failed', error_summary='stale: no finalize' WHERE status='running' AND started_at < now() - interval '6 hours'`) should be added in V2 ops tooling.
-- **Shopify storefront bot mitigation (placeholder User-Agent + IP reputation).** Discovered 2026-05-16 during step-4 live `--all` smoke test: after ~30 min of sustained scraping from one IP (cassette recordings + smoke), `yunnan_sourcing_com` returned 403 on page 8, and `white2tea` + `crimson_lotus` returned 403 on page 1. `yunnan_sourcing_us` succeeded. The configured default User-Agent is the `.env.example` placeholder `'tea-rec-engine/0.1 (https://github.com/gary/tea; contact: gary@...)'` with a fake repo URL and a fake contact email — almost certainly part of what the storefronts' edge (likely Cloudflare in front of Shopify) is mitigating against. Note that **cassette-replay tests are unaffected** (100/100 pytest green), and the CLI's per-vendor failure-isolation path behaved correctly (`scrape_run` rows finalized cleanly as `failed` with `terminal: ScrapeError ... returned 403`). Recommended V1.1 fix: set `USER_AGENT` env to a real contact + real repo URL; consider lowering `rate_limit_rps` for these vendors from 2 to 1; cron the scraper so traffic is paced over hours instead of bursts. Out of V1 scope to add a cloudscraper / playwright fallback per §11 ("Don't add browser automation prematurely").
+- **Cassette repo-size trajectory.** Surfaced 2026-05-16 in step-4 code review. The four Shopify vendors land ~15 MB of cassette YAML in `tests/fixtures/cassettes/`. Steepster (per-tea pages, ~10K+ pages probable), TeaDB (WP posts), and Reddit (thread bodies) at the same fidelity will scale this past 100 MB before step 9. That's a real repo-clone tax and PR-review friction. Three options to decide before step 7 (Steepster scraper) lands:
+  1. **Git LFS for `tests/fixtures/cassettes/`** — minimal code change; adds an LFS-pull step to CI and contributor setup.
+  2. **Gzipped cassettes** (`*.yaml.gz`) — vcrpy supports compression natively; ~10× shrink for JSON-heavy bodies; cassettes are no longer human-grep-able for token-leak audits without decompression.
+  3. **Per-source sampling policy** — keep a small "shape" cassette (3 pages worth) committed for replay tests; gitignore a larger sampled cassette that CI fetches from object storage on demand.
+  Decision owner: tech-lead, before step 7. Default if undecided: option 2 (gzipped), since it's the smallest behavior change and the leak-audit grep can run on a decompressed temp file.
+- **Shopify storefront bot mitigation (placeholder User-Agent + IP reputation).** Discovered 2026-05-16 during step-4 live `--all` smoke test: after ~30 min of sustained scraping from one IP (cassette recordings + smoke), `yunnan_sourcing_com` returned 403 on page 8, and `white2tea` + `crimson_lotus` returned 403 on page 1. `yunnan_sourcing_us` succeeded. The configured default User-Agent is the `.env.example` placeholder `'tea-rec-engine/0.1 (https://github.com/gary/tea; contact: gary@...)'` with a fake repo URL and a fake contact email — almost certainly part of what the storefronts' edge (likely Cloudflare in front of Shopify) is mitigating against. Note that **cassette-replay tests are unaffected** (100/100 pytest green), and the CLI's per-vendor failure-isolation path behaved correctly (`scrape_run` rows finalized cleanly as `failed` with `terminal: ScrapeError ... returned 403`). Recommended V1.1 fix: set `USER_AGENT` env to a real contact + real repo URL; consider lowering `rate_limit_rps` for these vendors from 2 to 1; cron the scraper so traffic is paced over hours instead of bursts. Out of V1 scope to add a cloudscraper / playwright fallback per §11 ("Don't add browser automation prematurely"). Operational details for V1.1 ops follow-up:
+  - **`HttpClient` already treats 403 as terminal** (`src/tea_scrapers/http/client.py:116`) — the retry budget is correctly not burned on soft blocks, so a 403 immediately finalizes the `scrape_run` row as `failed`. No retry-loop hardening needed.
+  - **Cool-down guidance.** A 403 from this class of mitigation typically clears in 5–60 minutes from the same IP. Cron the scraper at hourly cadence with per-vendor staggering rather than running `--all` back-to-back. Do not retry within the same process when a 403 hits; the next cron tick is the correct retry boundary.
+  - **Detection & alerting.** Add a structlog counter / metric on `scrape.request` events with `status=403`. When the cumulative rate across any rolling 1-hour window exceeds (say) 5% of total requests for a vendor, page ops — that's the signal that mitigation has escalated beyond transient cool-down. `RunTracker` already finalizes per-vendor rows correctly, but there's no cross-run trend signal today.
+  - **robots.txt position.** Not honored today. Shopify storefronts' `robots.txt` typically allows `/products.json` for low-rate crawlers but disallows aggressive paths (`/cart`, `/checkout`). Decide a V1.1 stance: opt-in honoring via `HttpClient`, or document explicitly that the project's scrapers are polite-but-not-robots-aware. Either way, the position should be in the spec, not implicit.
