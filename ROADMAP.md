@@ -26,7 +26,7 @@ The scrapers spec is the only complete v1 spec. The rest are stubs. Drafting fol
 
 - [x] **1. Scaffolding** — pyproject, project structure (scrapers spec §3), Postgres docker-compose, alembic init, CLI shell. **Decision (2026-05-16, tech-lead): scaffolding lives under `tea-scrapers/` subdirectory of repo root.** Rationale: scrapers spec §3 already trees that way; the umbrella `tea-db/` repo will gain sibling `tea-recommender/` and `tea-ui/` trees per design §5 and §8.
       _Owners: scraper-engineer + data-engineer_
-- [ ] **2. Shared infra** — `HttpClient` with rate limit + retry (§4), `JsonlWriter` with partitioning (§5), structlog config, run tracking (§8)
+- [x] **2. Shared infra** — `HttpClient` with rate limit + retry (§4), `JsonlWriter` (lives at `storage/raw.py`) with partitioning (§5), structlog config, run tracking (§8). **Spec sync (2026-05-16, scraper-engineer):** §4 now documents `HttpClient.RETRYABLE_STATUSES` (line 163) and the `scrape.request` transport-error event shape (line 176); §12 adds the stale `scrape_run` row sweep open item (line 755).
       _Owner: scraper-engineer_
 - [ ] **3. Shopify scraper** — generic implementation, vendor config loader (§6.1), end-to-end VCR test against yunnansourcing.us
       _Owners: scraper-engineer + qa-engineer_

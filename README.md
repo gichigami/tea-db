@@ -1,6 +1,6 @@
 # tea-db
 
-A Claude Code workspace scaffolded to act like a team of developers building the tea recommendation engine described in `tea_rec_engine_design_v2.md`. No implementation code yet — the team's first job is to draft the missing specs and then build against them.
+A Claude Code workspace scaffolded to act like a team of developers building the tea recommendation engine described in `tea_rec_engine_design_v2.md`. Implementation has begun against the scrapers spec (ingest steps 1-2 done per `ROADMAP.md`); the team's outstanding work splits between drafting the six stub specs and progressing the ingest backbone.
 
 ## What's in the box
 
