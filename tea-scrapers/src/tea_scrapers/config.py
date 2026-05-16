@@ -10,8 +10,34 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_PLACEHOLDER_UA_MARKERS: tuple[str, ...] = (
+    "github.com/gary/tea",
+    "contact: gary@",
+)
+
+
+def _reject_placeholder_ua(value: str, *, field: str) -> str:
+    """Reject the well-known placeholder ``User-Agent`` substrings.
+
+    The class defaults for ``user_agent`` and ``reddit_user_agent`` are
+    intentionally invalid (they contain ``github.com/gary/tea`` and
+    ``contact: gary@``). An operator who forgets to override them in
+    ``.env`` fails loudly here at ``Settings()`` instantiation rather than
+    silently tripping Shopify edge mitigation on the first real scrape —
+    see specs/tea_scrapers_v1_spec.md §12 (Shopify storefront bot mitigation).
+    """
+    lowered = value.lower()
+    for marker in _PLACEHOLDER_UA_MARKERS:
+        if marker in lowered:
+            raise ValueError(
+                f"{field} contains the placeholder substring {marker!r}. "
+                f"Set a real {field.upper()} in .env per .env.example "
+                f"(spec §12)."
+            )
+    return value
 
 
 class Settings(BaseSettings):
@@ -33,6 +59,16 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("user_agent")
+    @classmethod
+    def _validate_user_agent(cls, v: str) -> str:
+        return _reject_placeholder_ua(v, field="user_agent")
+
+    @field_validator("reddit_user_agent")
+    @classmethod
+    def _validate_reddit_user_agent(cls, v: str) -> str:
+        return _reject_placeholder_ua(v, field="reddit_user_agent")
 
 
 def get_settings() -> Settings:

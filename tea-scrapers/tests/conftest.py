@@ -15,11 +15,33 @@ remains until next-touch of that file (bronze-loader follow-up §12 #3).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 import vcr
+
+# Set real-looking UA env vars before any ``Settings()`` is instantiated.
+# The validator added in V1.1 (spec §12 / config.py:_reject_placeholder_ua)
+# rejects the class-default placeholder UAs at startup, which would break
+# every test that constructs an ``HttpClient`` without an injected
+# ``Settings``. Tests that want to exercise the validator pass
+# ``user_agent`` / ``reddit_user_agent`` explicitly to ``Settings(...)``,
+# which overrides the env here per pydantic-settings priority order.
+os.environ.setdefault(
+    "USER_AGENT",
+    "tea-db-scraper-test/0.0 (test; contact: test@example.com)",
+)
+os.environ.setdefault(
+    "REDDIT_USER_AGENT",
+    "tea-db-scraper-test/0.0 (test; contact: test@example.com)",
+)
+
+import sys
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _vcr_gzip import GzipFilesystemPersister  # noqa: E402
 
 
 def reset_session_caches() -> None:
@@ -84,10 +106,14 @@ def vcr_cassette() -> vcr.VCR:
     To re-record, set ``VCR_RECORD_MODE=once`` (or ``new_episodes``) in the
     environment for the single ``pytest`` invocation that captures the
     cassette, then unset it before committing.
+
+    Cassettes whose filenames end in ``.yaml.gz`` are transparently gzipped
+    via the registered :class:`GzipFilesystemPersister`; ``.yaml`` paths use
+    the upstream filesystem persister unchanged.
     """
     import os
 
-    return vcr.VCR(
+    instance = vcr.VCR(
         cassette_library_dir=str(_CASSETTE_DIR),
         record_mode=os.environ.get("VCR_RECORD_MODE", "none"),
         match_on=("method", "scheme", "host", "path", "query"),
@@ -97,3 +123,5 @@ def vcr_cassette() -> vcr.VCR:
         decode_compressed_response=True,
         before_record_response=_scrub_response,
     )
+    instance.register_persister(GzipFilesystemPersister)
+    return instance

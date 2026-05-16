@@ -87,6 +87,12 @@ The hard rule: **no implementation in an area before that area's spec is drafted
 3. Run `/next-task` to pick up the next item. Early on, the answer will be a `SPEC:` task — drafting one of the six stub specs.
 4. When `/next-task` proposes delegating to a specialist, accept; the specialist agent has the full domain context baked into its prompt.
 
+## Before running scrapers
+
+Copy `tea-scrapers/.env.example` to `tea-scrapers/.env` and keep the real `USER_AGENT` and `REDDIT_USER_AGENT` values that ship in the template (they point at this repo + `gjohnson@pioneer-aero.com`). The class defaults in `src/tea_scrapers/config.py` are intentionally invalid — `Settings` rejects them at startup, so the project refuses to scrape until a real UA is in place. Cloudflare flags placeholder UAs and the step-4 smoke test caught 403s on three of four Shopify vendors as a result; see `specs/tea_scrapers_v1_spec.md` §12.
+
+For sustained scraping, use `tea-scrapers/scripts/crontab.example` (hourly per-vendor stagger, daily bronze + silver pipeline) rather than `tea-scrape ingest shopify --all` in one burst. If a vendor returns 403, allow ≥1 hour cool-down from the same IP before retrying.
+
 ## House rules
 
 - **Design doc wins** over intuition. **Scrapers spec wins** over generic best practice (it was deliberately authored to override generic patterns — see its §11).

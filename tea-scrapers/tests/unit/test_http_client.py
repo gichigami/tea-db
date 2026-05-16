@@ -98,6 +98,46 @@ def test_auth_failure_is_terminal_without_retry(httpx_mock):
         client.get("https://example.test/u")
 
 
+def test_403_emits_terminal_block_log_event(httpx_mock, captured_logs):
+    httpx_mock.add_response(url="https://example.test/b3", status_code=403)
+    client, _ = _client(httpx_mock)
+    with pytest.raises(ScrapeError):
+        client.get("https://example.test/b3")
+
+    events = [e for e in captured_logs.entries if e["event"] == "scrape.request"]
+    assert events, "expected at least one scrape.request event"
+    terminal = [e for e in events if e.get("terminal_block")]
+    assert len(terminal) == 1
+    assert terminal[0]["status"] == 403
+    assert terminal[0]["log_level"] == "warning"
+
+
+def test_401_emits_terminal_block_log_event(httpx_mock, captured_logs):
+    httpx_mock.add_response(url="https://example.test/b1", status_code=401)
+    client, _ = _client(httpx_mock)
+    with pytest.raises(ScrapeError):
+        client.get("https://example.test/b1")
+
+    events = [e for e in captured_logs.entries if e["event"] == "scrape.request"]
+    terminal = [e for e in events if e.get("terminal_block")]
+    assert len(terminal) == 1
+    assert terminal[0]["status"] == 401
+    assert terminal[0]["log_level"] == "warning"
+
+
+def test_200_does_not_emit_terminal_block_field(httpx_mock, captured_logs):
+    httpx_mock.add_response(url="https://example.test/ok", json={})
+    client, _ = _client(httpx_mock)
+    client.get("https://example.test/ok")
+
+    events = [e for e in captured_logs.entries if e["event"] == "scrape.request"]
+    assert events, "expected at least one scrape.request event"
+    for e in events:
+        assert "terminal_block" not in e, (
+            f"non-terminal request must not carry terminal_block field: {e}"
+        )
+
+
 def test_rate_limiter_invoked_per_request(httpx_mock):
     httpx_mock.add_response(url="https://slow.test/a", json={})
     httpx_mock.add_response(url="https://slow.test/b", json={})

@@ -1,0 +1,44 @@
+# tea-db ingest schedule (V1.1 ops template).
+#
+# Hourly Shopify scrapes, staggered per-vendor over a 60-minute window so
+# no single Shopify CDN sees the project's traffic as bursty. The 15-minute
+# stagger isn't load-bearing — anything that breaks up bursts is fine; the
+# point is to avoid running `tea-scrape ingest shopify --all` in one go.
+#
+# Rationale: specs/tea_scrapers_v1_spec.md §12 (Shopify storefront bot
+# mitigation) + tech-lead audit 2026-05-16. Running --all from a single IP
+# in a short window triggered Cloudflare 403s on 3 of 4 vendors during
+# the step-4 smoke test.
+#
+# This file is a template, NOT a wired-up cron. ROADMAP step 10 lands the
+# actual cron integration (shell wrappers, env sourcing, log rotation).
+#
+# Setup before installing:
+#   1. Replace /path/to/tea-db with the absolute path to your checkout.
+#   2. Ensure ~/.venvs/tea-scrapers/bin is the venv path the project uses
+#      (or substitute your venv path).
+#   3. Source the project's .env so USER_AGENT / DATABASE_URL / etc. are set:
+#        env $(cat /path/to/tea-db/tea-scrapers/.env | xargs) tea-scrape ...
+#      or use a wrapper shell script (preferred for step 10).
+#   4. Create /var/log/tea-db/ with appropriate permissions, or redirect
+#      logs elsewhere.
+#
+# Install with: crontab tea-scrapers/scripts/crontab.example
+
+# Minute  5 — yunnan_sourcing_us
+5  * * * * cd /path/to/tea-db/tea-scrapers && ~/.venvs/tea-scrapers/bin/tea-scrape ingest shopify --vendor yunnan_sourcing_us >> /var/log/tea-db/yunnan_sourcing_us.log 2>&1
+
+# Minute 20 — yunnan_sourcing_com
+20 * * * * cd /path/to/tea-db/tea-scrapers && ~/.venvs/tea-scrapers/bin/tea-scrape ingest shopify --vendor yunnan_sourcing_com >> /var/log/tea-db/yunnan_sourcing_com.log 2>&1
+
+# Minute 35 — white2tea
+35 * * * * cd /path/to/tea-db/tea-scrapers && ~/.venvs/tea-scrapers/bin/tea-scrape ingest shopify --vendor white2tea >> /var/log/tea-db/white2tea.log 2>&1
+
+# Minute 50 — crimson_lotus
+50 * * * * cd /path/to/tea-db/tea-scrapers && ~/.venvs/tea-scrapers/bin/tea-scrape ingest shopify --vendor crimson_lotus >> /var/log/tea-db/crimson_lotus.log 2>&1
+
+# Daily bronze + silver pipeline at 02:00 UTC, after all 4 vendors have
+# landed at least one hour of scrapes. `date -u -v-1d` is the macOS form;
+# Linux operators want `date -u --date='1 day ago'` instead.
+0 2 * * * cd /path/to/tea-db/tea-scrapers && ~/.venvs/tea-scrapers/bin/tea-scrape load --since $(date -u -v-1d +\%Y-\%m-\%d) >> /var/log/tea-db/load.log 2>&1
+5 2 * * * cd /path/to/tea-db/tea-scrapers && ~/.venvs/tea-scrapers/bin/tea-scrape normalize --since $(date -u -v-1d +\%Y-\%m-\%d) >> /var/log/tea-db/normalize.log 2>&1

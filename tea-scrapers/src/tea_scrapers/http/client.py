@@ -105,6 +105,24 @@ class HttpClient:
                 continue
 
             duration_ms = int((time.monotonic() - started) * 1000)
+
+            if response.status_code in (401, 403):
+                # Terminal block (likely Cloudflare / WAF rather than a soft
+                # rate limit). Surfaced as a WARNING with ``terminal_block=True``
+                # so operators can aggregate on this field across runs to
+                # detect mitigation escalation (spec §12).
+                self._log.warning(
+                    "scrape.request",
+                    url=url,
+                    status=response.status_code,
+                    duration_ms=duration_ms,
+                    attempt=attempt,
+                    terminal_block=True,
+                )
+                raise ScrapeError(
+                    f"{method} {url} returned {response.status_code} (auth/terminal)"
+                )
+
             self._log.info(
                 "scrape.request",
                 url=url,
@@ -112,11 +130,6 @@ class HttpClient:
                 duration_ms=duration_ms,
                 attempt=attempt,
             )
-
-            if response.status_code in (401, 403):
-                raise ScrapeError(
-                    f"{method} {url} returned {response.status_code} (auth/terminal)"
-                )
 
             if response.status_code in self.RETRYABLE_STATUSES:
                 if attempt >= self._max_retries:

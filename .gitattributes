@@ -1,0 +1,2 @@
+# Gzipped VCR cassettes are binary; suppress diff + line-ending normalization.
+*.yaml.gz binary
