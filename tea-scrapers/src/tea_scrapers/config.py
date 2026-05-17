@@ -6,6 +6,7 @@ Spec reference: specs/tea_scrapers_v1_spec.md §4 (Configuration).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +99,95 @@ class VendorConfig(BaseModel):
     rate_limit_rps: float = 2.0
 
 
+class SteepsterConfig(BaseModel):
+    """Configuration for the (single) Steepster source.
+
+    Spec reference: specs/tea_scrapers_v1_spec.md §6.2.
+
+    Unlike Shopify (one vendor per `source_key`), Steepster is one *source*
+    that crawls many vendor slugs. `vendor_slugs` is the V1 allowlist
+    (§6.2 "Vendor slugs to crawl") — scope-expansion past the allowlist is
+    a tech-lead V1.1 decision (§12 "Steepster corpus scope expansion").
+
+    `rate_limit_rps` defaults to 0.1 to honor robots.txt `Crawl-Delay: 10`
+    (one request per 10 seconds; §6.2). `timeout_seconds` defaults to 60 to
+    cover the slow first-hit render times observed on tea-detail pages
+    (§6.2 "HTTP timeout ≥ 60 seconds").
+    """
+
+    base_url: str = Field(default="https://steepster.com", min_length=1)
+    rate_limit_rps: float = 0.1
+    timeout_seconds: float = 60.0
+    vendor_slugs: list[str] = Field(default_factory=list)
+
+
+def load_steepster_config(path: Path | None = None) -> SteepsterConfig:
+    """Load the `steepster:` block from a YAML file.
+
+    Same on-disk file as `load_shopify_vendors` (`config/vendors.yaml` by
+    default); just a different top-level key. Absent block → return defaults
+    so a fresh checkout doesn't error before the operator wires `.env`.
+    Malformed values (negative rate, non-list slugs) raise ``ValueError``.
+    """
+    resolved_path = path or Path("config/vendors.yaml")
+    try:
+        raw_text = resolved_path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ValueError(f"vendor config not found at {resolved_path}") from exc
+
+    parsed: Any = yaml.safe_load(raw_text)
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"{resolved_path}: expected top-level mapping, got {type(parsed).__name__}"
+        )
+
+    section = parsed.get("steepster")
+    if section is None:
+        return SteepsterConfig()
+    if not isinstance(section, dict):
+        raise ValueError(
+            f"{resolved_path}: 'steepster' must be a mapping, "
+            f"got {type(section).__name__}"
+        )
+
+    try:
+        cfg = SteepsterConfig(**section)
+    except ValidationError as exc:
+        raise ValueError(
+            f"{resolved_path}: 'steepster' block is malformed: {exc}"
+        ) from exc
+
+    # Env override for the rate limit (and only the rate limit). Two
+    # legitimate consumers:
+    # 1. Integration tests replaying VCR cassettes — the rate limiter
+    #    has no idea VCR is intercepting and would still sleep
+    #    `1 / rate_limit_rps` between requests, making a 100-page cassette
+    #    replay take 1000s.
+    # 2. Operators who, with evidence and after V1.1, want to bump or
+    #    drop the rate without editing the committed yaml.
+    # YAML stays the polite-citizen default (0.1 rps = crawl-delay 10s).
+    env_override = os.environ.get("STEEPSTER_RATE_LIMIT_RPS")
+    if env_override is not None:
+        try:
+            cfg = cfg.model_copy(update={"rate_limit_rps": float(env_override)})
+        except ValueError as exc:
+            raise ValueError(
+                f"STEEPSTER_RATE_LIMIT_RPS={env_override!r} is not a float"
+            ) from exc
+
+    if cfg.rate_limit_rps <= 0:
+        raise ValueError(
+            f"{resolved_path}: 'steepster' rate_limit_rps must be > 0 "
+            f"(got {cfg.rate_limit_rps})"
+        )
+    if cfg.timeout_seconds <= 0:
+        raise ValueError(
+            f"{resolved_path}: 'steepster' timeout_seconds must be > 0 "
+            f"(got {cfg.timeout_seconds})"
+        )
+    return cfg
+
+
 def load_shopify_vendors(path: Path | None = None) -> dict[str, VendorConfig]:
     """Load `shopify_vendors` from a YAML file into a dict keyed by source_key.
 
@@ -151,4 +241,11 @@ def load_shopify_vendors(path: Path | None = None) -> dict[str, VendorConfig]:
     return out
 
 
-__all__ = ["Settings", "get_settings", "VendorConfig", "load_shopify_vendors"]
+__all__ = [
+    "Settings",
+    "get_settings",
+    "VendorConfig",
+    "load_shopify_vendors",
+    "SteepsterConfig",
+    "load_steepster_config",
+]

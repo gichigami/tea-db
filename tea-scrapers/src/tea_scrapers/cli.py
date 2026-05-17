@@ -16,12 +16,19 @@ import structlog
 from sqlalchemy.exc import InterfaceError, OperationalError
 from ulid import ULID
 
-from tea_scrapers.config import VendorConfig, get_settings, load_shopify_vendors
+from tea_scrapers.config import (
+    SteepsterConfig,
+    VendorConfig,
+    get_settings,
+    load_shopify_vendors,
+    load_steepster_config,
+)
 from tea_scrapers.http.client import HttpClient
 from tea_scrapers.load import BronzeLoader
 from tea_scrapers.logging import configure_logging
 from tea_scrapers.normalize import ProductDecision, SilverNormalizer
-from tea_scrapers.sources import ShopifyScraper
+from tea_scrapers.sources import ShopifyScraper, SteepsterScraper
+from tea_scrapers.sources.steepster import SOURCE_KEY as STEEPSTER_SOURCE_KEY
 from tea_scrapers.storage.raw import JsonlWriter
 from tea_scrapers.storage.run_tracker import RunTracker
 
@@ -113,12 +120,104 @@ def _run_one_shopify_vendor(vendor: VendorConfig, mode: str) -> None:
 
 
 @ingest.command("steepster")
-@click.option("--vendor", "vendor", required=True, type=str, help="Steepster vendor slug.")
+@click.option(
+    "--vendor",
+    "vendor_slug",
+    type=str,
+    default=None,
+    help="Single Steepster vendor slug (e.g. 'yunnan-sourcing'). Omit for full allowlist.",
+)
+@click.option(
+    "--all",
+    "all_vendors",
+    is_flag=True,
+    default=False,
+    help="Run the full vendor allowlist from config/vendors.yaml::steepster.vendor_slugs.",
+)
+@click.option(
+    "--max-teas",
+    "max_teas",
+    default=None,
+    type=int,
+    help="Cap the number of teas per vendor (for smoke runs and integration tests).",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["full", "incremental"]),
+    default="incremental",
+    show_default=True,
+)
 @click.pass_context
-def ingest_steepster(ctx: click.Context, vendor: str) -> None:
-    """Scrape Steepster tea pages + tasting notes for a vendor."""
-    click.echo("not implemented")
+def ingest_steepster(
+    ctx: click.Context,
+    vendor_slug: str | None,
+    all_vendors: bool,
+    max_teas: int | None,
+    mode: str,
+) -> None:
+    """Scrape Steepster tea pages + tasting notes (spec §6.2)."""
+    if not vendor_slug and not all_vendors:
+        raise click.UsageError("Pass either --vendor <slug> or --all.")
+
+    config = load_steepster_config()
+    if vendor_slug:
+        if vendor_slug not in config.vendor_slugs:
+            raise click.UsageError(
+                f"unknown vendor slug '{vendor_slug}'. "
+                f"Known (from config/vendors.yaml::steepster.vendor_slugs): "
+                f"{sorted(config.vendor_slugs)}"
+            )
+        slugs = [vendor_slug]
+    else:
+        slugs = list(config.vendor_slugs)
+        if not slugs:
+            raise click.UsageError(
+                "config/vendors.yaml::steepster.vendor_slugs is empty; "
+                "nothing to scrape."
+            )
+
+    try:
+        _run_steepster(config, slugs, max_teas, mode)
+    except Exception as exc:  # noqa: BLE001 — terminal scrape failure
+        _log.error(
+            "scrape.steepster.failed",
+            error=type(exc).__name__,
+            message=str(exc),
+        )
+        ctx.exit(2)
+        return
     ctx.exit(0)
+
+
+def _run_steepster(
+    config: SteepsterConfig,
+    vendor_slugs: list[str],
+    max_teas: int | None,
+    mode: str,
+) -> None:
+    """Open a single tracker+client+writer triple and drive SteepsterScraper.run().
+
+    Steepster is one *source* (not per-vendor like Shopify), so the
+    `scrape_run` row uses ``source='steepster'`` regardless of which slugs
+    were crawled. The slug allowlist is captured implicitly in the JSONL
+    record's `vendor_slug` field, not in the run metadata.
+    """
+    run_id = str(ULID())
+    settings = get_settings()
+    with RunTracker(source=STEEPSTER_SOURCE_KEY, mode=mode, run_id=run_id) as tracker:
+        # Per-source timeout override (§6.2: ≥60s for tea-detail pages).
+        with HttpClient(timeout_seconds=config.timeout_seconds) as http_client:
+            with JsonlWriter(run_id=run_id, base_dir=settings.raw_data_dir) as writer:
+                scraper = SteepsterScraper(
+                    config=config,
+                    http_client=http_client,
+                    writer=writer,
+                    tracker=tracker,
+                    run_id=run_id,
+                    vendor_slugs=vendor_slugs,
+                    max_teas_per_vendor=max_teas,
+                )
+                scraper.run(mode)
 
 
 @ingest.command("teadb")

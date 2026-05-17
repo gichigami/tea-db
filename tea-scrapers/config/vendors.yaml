@@ -26,3 +26,31 @@ shopify_vendors:
     display_name: "Crimson Lotus Tea"
     base_url: "https://crimsonlotustea.com"
     rate_limit_rps: 2
+
+# ---------------------------------------------------------------------------
+# Steepster (community review site; spec §6.2).
+#
+# Not a "vendor" — it's a single community source whose payload references
+# many upstream tea producers via per-company URL slugs. Lives here rather
+# than in a separate `config/sources.yaml` because the existing schema
+# already cleanly accommodates "list of upstream-slug entries with a shared
+# scrape policy" and adding a parallel file would just split the config
+# surface needlessly. See spec §12 step-7 architectural-decision note.
+#
+# `rate_limit_rps: 0.1` honors steepster's robots.txt `Crawl-Delay: 10`
+# (spec §6.2). `timeout_seconds: 60` accommodates the slow first-hit render
+# times observed on tea-detail pages (15–25s) and the ~9MB sitemap.
+# `vendor_slugs` is the V1 allowlist (spec §6.2 "Vendor slugs to crawl").
+# ---------------------------------------------------------------------------
+steepster:
+  base_url: "https://steepster.com"
+  rate_limit_rps: 0.1
+  timeout_seconds: 60
+  vendor_slugs:
+    - "yunnan-sourcing"
+    - "white2tea"
+    - "crimson-lotus-tea"
+    - "bitterleaf-teas"
+    - "menghai-tea-factory"
+    - "xiaguan-tea-factory"
+    - "dayi"

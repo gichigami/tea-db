@@ -398,9 +398,11 @@ Initial list (matches Tier 1 Shopify quartet plus high-history vendors):
 
 #### Strategy
 
-**Preferred enumeration: sitemap.** Steepster publishes `https://steepster.com/sitemap1.xml` (~9.3 MB, lists ~41,165 tea URLs and ~8,820 company URLs in a single XML document) and three additional `sitemap{2,3,4}.xml` indexes referenced from `/robots.txt`. The scraper SHOULD fetch and parse `sitemap1.xml` for enumeration, filter by `vendor_slug` against the V1 allowlist (§6.2 vendor allowlist above), and fetch only matching tea-detail pages. Walking vendor index pages remains a fallback if a sitemap entry is missing.
+**V1 enumeration: company-index pagination.** For each vendor slug in the V1 allowlist, walk `/companies/{slug}?page=N` and collect tea-detail URLs from each page. This is the implemented strategy as of step 7 (see step-7 follow-up #4 in §12 for rationale; the short version is that downloading the 9.3 MB `sitemap1.xml` per run is wasteful relative to a 7-vendor allowlist whose largest member produces ~3,700 detail fetches either way).
 
-1. For each vendor slug, paginate the vendor index, collect tea URLs (fallback path; prefer sitemap above)
+**Sitemap-based enumeration MAY be preferred** if the allowlist is removed or expands past ~20 vendors. Steepster publishes `https://steepster.com/sitemap1.xml` (~9.3 MB, lists ~41,165 tea URLs and ~8,820 company URLs in a single XML document) and three additional `sitemap{2,3,4}.xml` indexes referenced from `/robots.txt`. At that scale, sitemap-filter-then-fetch is cheaper than walking every vendor's company index.
+
+1. For each vendor slug, paginate the vendor index, collect tea URLs
 2. For each tea URL, fetch detail page, extract:
    - Tea name
    - Stated metadata (year, style, etc.)
@@ -416,10 +418,16 @@ Initial list (matches Tier 1 Shopify quartet plus high-history vendors):
 
 #### Output
 
-One JSONL record per tea:
+One JSONL record per tea. The shipped (step-7) record captures every visible field per §11; the schema below is canonical:
+
 ```json
 {
-  "ingest_meta": {...},
+  "ingest_meta": {
+    "source": "steepster",
+    "external_id": "12345",
+    "endpoint": "https://steepster.com/teas/yunnan-sourcing/12345-...",
+    "...": "..."
+  },
   "payload": {
     "steepster_id": "12345",
     "url": "https://steepster.com/teas/yunnan-sourcing/12345-2013-yunnan-sourcing-yi-dian-hong",
@@ -428,19 +436,63 @@ One JSONL record per tea:
     "average_rating": 79,
     "rating_count": 12,
     "description": "...",
+    "description_pairs": {
+      "Tea type": "Black Tea",
+      "Ingredients": "...",
+      "Flavors": "Cocoa, Malt, Honey, ...",
+      "Sold in": "Bulk, Loose Leaf",
+      "Caffeine": "High"
+    },
+    "prep": {
+      "temp": "205 °F / 96 °C",
+      "steep-time": "2 min, 45 sec",
+      "tea-amount": "5 g",
+      "water-volume": "9 oz / 272 ml"
+    },
+    "availability_text": "Currently unavailable",
     "tasting_notes": [
       {
-        "author_hash": "sha256:...",
+        "steepster_note_id": "225516",
+        "author_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "rating": 82,
         "body": "Sweet, woody, hints of cocoa...",
-        "posted_at": "2014-03-15"
+        "posted_at": "2014-03-15T12:00:00Z",
+        "like_count": 24,
+        "comment_count": 0
       }
     ]
   }
 }
 ```
 
-Hash author names rather than capturing them, for downstream privacy hygiene.
+**Author hashing.** Hash author names rather than capturing them, for downstream privacy hygiene. Algorithm pinned 2026-05-16 (closes §12 step-7 OQ #5):
+
+- **Unsalted SHA-256** of the NFC-normalized, lowercased, whitespace-stripped username, prefixed with the literal `sha256:`. Unsalted is intentional — cross-run reproducibility supports the "returning-reviewer" dedup the downstream silver layer needs, and a salt would make every run's hashes incomparable to the previous run's.
+- Implementation: `tea_scrapers.sources.steepster.hash_author`. The `sha256:` prefix exists so a future schema migration to a salted scheme can be distinguished from V1 hashes without touching every historical row.
+
+**Pagination terminators.** Resolved 2026-05-16 (closes §12 step-7 OQ #6):
+
+- Company-index walk: terminate when a page has zero `/teas/{slug}/...` hrefs OR when no `<a>` element labeled `Next` with an `?page=` href is present. Both signals checked because the last numbered company page typically still has a "Next" link in the chrome.
+- Tea-detail notes walk: terminate when a page has zero `<div class='note'>` blocks OR when no "Next + `?page=`" link is present (same partial as the company index).
+
+**Config location.** Steepster lives in the same `config/vendors.yaml` as the Shopify vendors under a sibling top-level `steepster:` key rather than in a separate `config/sources.yaml` (decision pinned in the step-7 PR). The Steepster entry is **not a vendor** — it's one community source whose payload references many producers via `vendor_slug`. Loader is `tea_scrapers.config.load_steepster_config`. Schema:
+
+```yaml
+steepster:
+  base_url: "https://steepster.com"
+  rate_limit_rps: 0.1        # honors robots.txt Crawl-Delay: 10
+  timeout_seconds: 60        # tea-detail render times observed at 15–25s
+  vendor_slugs:              # V1 allowlist
+    - "yunnan-sourcing"
+    - "white2tea"
+    - "crimson-lotus-tea"
+    - "bitterleaf-teas"
+    - "menghai-tea-factory"
+    - "xiaguan-tea-factory"
+    - "dayi"
+```
+
+**`STEEPSTER_RATE_LIMIT_RPS` env override.** The loader honors this env var to let VCR-replay integration tests bypass the 10-second crawl delay (the rate limiter has no idea VCR is intercepting and would sleep against a wall clock anyway). Operators can also use it to tune live rate temporarily without editing the committed YAML. The committed YAML default (0.1 rps) is the polite-citizen contract — env override should be set to the higher value (e.g. `100`) only in test/dev contexts.
 
 ### 6.3 TeaDB.org (Tier 2)
 
@@ -827,9 +879,17 @@ Things agents should NOT do:
 - **Steepster corpus scope expansion** (filed 2026-05-16, owner: tech-lead, target: V1.1). Sitemap reveals 41,165 tea URLs total; V1 fetches only those matching the §6.2 vendor allowlist (~7 vendors). At robots-compliant `Crawl-Delay: 10` a full corpus crawl is ~5 days wall-clock and produces ~30K tea pages whose producer/style coverage falls outside V1's catalog. Open question: when (and against what selection criterion) should V1.1 expand the Steepster crawl beyond the allowlist? Candidate criteria: (a) join-overlap with `producer` table once V.4 lands, (b) review-count thresholds on Steepster, (c) editorial pick of legendary/discontinued producers (design §5). Defer until V.4 join evidence is in hand.
 - **Steepster producer-slug ↔ producer-identity mismatch** (filed 2026-05-16, owner: scraper-engineer + data-engineer, target: first Steepster silver-load PR). Steepster's `/companies/{slug}` URLs use vendor- or reseller-style slugs (e.g. `/companies/yunnan-sourcing` is the retailer, not an upstream producer). For producers like Menghai Tea Factory or Xiaguan that ship through multiple retailers, coverage under any single Steepster slug may be thin or fragmented across slugs (e.g. `/companies/menghai-tea-factory` vs `/companies/dayi` vs producer mentions inside Yunnan Sourcing-listed teas). Open question: should the §6.2 vendor allowlist be expanded for these producers based on first-crawl evidence, or should silver-layer producer normalization (alias table from step 6) handle the merge? Decide during the first allowlisted crawl when concrete numbers are available. This is a producer-identity question, not a scope-policy change.
 - **Step-7 Steepster kickoff risks.** Filed 2026-05-16 by tech-lead, pending decisions before or during step-7 implementation. Each is independent; resolve in the appropriate PR.
-  1. **Non-Shopify `vendor_external_id` scheme for Steepster** (owner: data-engineer + scraper-engineer). Silver normalizer's composite `vendor_external_id = "{product_id}:{variant_id}"` is Shopify-specific. What is Steepster's equivalent? Candidate: the numeric `tea_id` parsed from `/teas/{vendor-slug}/{tea-id}-{tea-slug}`. Decision needed when Steepster→silver loader gets specced; cross-link to silver normalizer follow-up #1.
-  2. **Bronze record schema: reuse `raw_product_snapshot` with `source='steepster'`, or introduce `raw_review_snapshot`?** (owner: data-engineer). Steepster's natural unit is "tea + inlined review list" (not "product snapshot"). Reusing `raw_product_snapshot` conflates two semantic shapes under one bronze table; splitting introduces a second bronze loader path. Decide before step-7 silver-load; cross-link to OQ on producer-slug mismatch above.
-  3. **Steepster→`product` join strategy** (owner: data-engineer + ml-engineer). Per design §5 / ROADMAP V.4, the join from Steepster review data into the catalog is at producer + style level, not 1:1 product match. Pin that step 7 does NOT attempt `vendor_product` fan-out from Steepster — bronze captures the records, and the join lands later as part of V.4 work. Document this boundary in the step-7 PR to prevent scope creep.
-  4. **Tier system applicability to reviews** (owner: tech-lead). A/B/C/D is a product-availability concept (design §3); reviews have no availability. Either reviews bypass `tier` entirely (recommended default; review records are not tier-eligible) or "tier" gains a second meaning (overload, not recommended). Decide before Steepster silver-load.
-  5. **Author hashing specifics** (owner: scraper-engineer). §6.2 says "hash author names" — pin: SHA-256, unsalted, NFC-normalized lowercased input. Unsalted is intentional so the hash is reproducible across runs to support returning-reviewer dedup downstream. Decide and document in the step-7 PR; encode in `sources/steepster.py` with a unit test asserting hash stability across two normalized inputs.
-  6. **HTML pagination terminator semantics** (owner: scraper-engineer). Shopify gave a deterministic "empty array = end of pages." Steepster HTML pagination is uncertain (last-page link missing? "next" button disabled? 404 on overshoot? notes inline-on-one-page vs paginated?). The Rishi Tea probe page (510 KB) showed no `?page=` markers in the body, suggesting at least some pages inline all notes — but the `--max-time 19s` curl cap may have curtailed the response, so verify in step-7 code. Decide the terminator condition in the step-7 PR with at least one positive (paginated) and one negative (single-page) cassette.
+  1. **Non-Shopify `vendor_external_id` scheme for Steepster** (owner: data-engineer + scraper-engineer). Silver normalizer's composite `vendor_external_id = "{product_id}:{variant_id}"` is Shopify-specific. What is Steepster's equivalent? Candidate: the numeric `tea_id` parsed from `/teas/{vendor-slug}/{tea-id}-{tea-slug}`. **Step-7 update (2026-05-16, scraper-engineer):** the scraper writes `external_id = <tea_id>` in `ingest_meta`, consistent with the candidate. Silver loader is data-engineer's call when step-7 silver-load gets specced; cross-link to silver normalizer follow-up #1.
+  2. **Bronze record schema: reuse `raw_product_snapshot` with `source='steepster'`, or introduce `raw_review_snapshot`?** (owner: data-engineer). Steepster's natural unit is "tea + inlined review list" (not "product snapshot"). Reusing `raw_product_snapshot` conflates two semantic shapes under one bronze table; splitting introduces a second bronze loader path. **Step-7 status (2026-05-16):** still open. The Steepster JSONL output is shape-compatible with the existing bronze loader (one record per `external_id` per `source`, with `payload` as a self-describing dict), so the loader writes Steepster rows into `raw_product_snapshot` with `source='steepster'` today. That's a load-time choice, reversible if the data-engineer decides to split. Cross-link to OQ on producer-slug mismatch above.
+  3. **Steepster→`product` join strategy** (owner: data-engineer + ml-engineer). Per design §5 / ROADMAP V.4, the join from Steepster review data into the catalog is at producer + style level, not 1:1 product match. Pin that step 7 does NOT attempt `vendor_product` fan-out from Steepster — bronze captures the records, and the join lands later as part of V.4 work. **Step-7 status (2026-05-16):** honored. Scraper writes JSONL only; no silver fan-out attempted.
+  4. **Tier system applicability to reviews** (owner: tech-lead). A/B/C/D is a product-availability concept (design §3); reviews have no availability. Either reviews bypass `tier` entirely (recommended default; review records are not tier-eligible) or "tier" gains a second meaning (overload, not recommended). Decide before Steepster silver-load. **Step-7 status (2026-05-16):** still open. Scraper-side neutral — the JSONL has no tier field.
+  5. **Author hashing specifics** (owner: scraper-engineer). ~~§6.2 says "hash author names" — pin: SHA-256, unsalted, NFC-normalized lowercased input. Unsalted is intentional so the hash is reproducible across runs to support returning-reviewer dedup downstream.~~ **Resolved 2026-05-16 (scraper-engineer):** SHA-256, unsalted, NFC + lowercase + strip, prefixed `sha256:`. Implementation in `tea_scrapers.sources.steepster.hash_author`; unit tests in `tests/unit/test_steepster_scraper.py::TestHashAuthor` pin stability + NFC + case-insensitivity. The `sha256:` prefix is mandatory so a future schema migration to a salted scheme can be distinguished without touching historical rows. §6.2 above now documents the algorithm as part of the schema.
+  6. **HTML pagination terminator semantics** (owner: scraper-engineer). ~~Shopify gave a deterministic "empty array = end of pages." Steepster HTML pagination is uncertain (last-page link missing? "next" button disabled? 404 on overshoot? notes inline-on-one-page vs paginated?). The Rishi Tea probe page (510 KB) showed no `?page=` markers in the body, suggesting at least some pages inline all notes — but the `--max-time 19s` curl cap may have curtailed the response, so verify in step-7 code. Decide the terminator condition in the step-7 PR with at least one positive (paginated) and one negative (single-page) cassette.~~ **Resolved 2026-05-16 (scraper-engineer):** Verified against real `crimson-lotus-tea` company page + `crimson-lotus-tea/{tea-id}-...` detail pages. Terminator pinned in §6.2 above. Both the company-index walk and the tea-detail notes walk check the same two signals: zero in-scope items found OR no "Next + `?page=`" link. Unit tests `tests/unit/test_steepster_scraper.py::TestVendorPageEnumeration::test_pagination_terminates_when_no_next_link` and `test_note_pagination_followed` cover the positive (paginated) and negative (single-page) cases respectively. The recorded VCR cassette `tests/fixtures/cassettes/steepster_crimson_lotus_tea.yaml.gz` exercises both terminators on real markup.
+
+- **Step-7 follow-ups (filed 2026-05-16, owner per item; non-blocking).** Filed during the step-7 Steepster scraper landing PR.
+  1. **`STEEPSTER_RATE_LIMIT_RPS` env override consumes a Settings-shaped env var without going through `Settings`.** The override is read directly via `os.environ.get` in `load_steepster_config`. It works, but a future refactor that consolidates env-driven config into `Settings` will want to lift this knob over so the precedence order is consistent across all env-vars. Non-urgent; only one consumer today (integration tests).
+  2. **`max_teas_per_vendor` is scraper-side only, not in `SteepsterConfig`.** The CLI plumbs `--max-teas` to `SteepsterScraper(..., max_teas_per_vendor=N)`; the YAML has no `max_teas_per_vendor` knob. If V1.1 ops wants a per-vendor cap (e.g. "scrape 500 teas per vendor per nightly run; the full backwalk is the weekend cron"), lift the cap into `SteepsterConfig`.
+  3. **Author-name leak audit is structural, not substring.** `test_no_plaintext_author_field_in_notes` asserts the per-note schema has `author_hash` and no plaintext-author field under a fixed forbidden-key set. It does NOT scan the JSONL for verbatim username substrings, because reviewers legitimately mention each other by name in note body text (and stripping that would violate §11 "capture every record verbatim"). If a future refactor stops emitting `author_hash` in favor of a different key (e.g. `reviewer_hash`), this test's forbidden-key list would silently miss the regression. Cross-link: when an LLM extraction layer for tasting notes lands (V.3), revisit whether body text needs PII redaction — that's a separate concern from the scraper-side hash.
+  4. **Company-index sitemap fallback not implemented.** §6.2 calls sitemap-based enumeration "preferred" with company-index pagination as a fallback. The V1 implementation does the opposite: it walks the company index directly. Rationale: a single-vendor crawl with a 7-slug allowlist is bounded (the largest vendor, Yunnan Sourcing, is ~3,700 teas across 367 pages = ~3,700 detail fetches either way), and walking the company index avoids the 9.3MB `sitemap1.xml` download for every run. Revisit if V1.1 expands the allowlist past ~20 vendors or removes it entirely.
+  5. **`crimson-lotus-tea` cassette is 8.3 MB compressed (48 MB uncompressed).** Larger than any Shopify cassette (the biggest is ~5 MB). It's still well below the 100 MB threshold flagged in the original §12 cassette-size trajectory item, and gzip is doing 5.8× compression, but Steepster (and TeaDB, Reddit ahead) will continue this growth curve. If the cumulative `tests/fixtures/cassettes/` directory crosses ~50 MB on disk, revisit Option 3 from the original cassette-size resolution (per-source sampling policy with cassettes in object storage).
+  6. **`max_teas_per_vendor` slice happens after the full company-index walk.** `SteepsterScraper._collect_tea_urls` paginates the entire company index for a vendor before the caller slices to `max_teas_per_vendor` in `scrape_vendor` (`sources/steepster.py:164-165`). The crimson-lotus-tea cassette therefore walked all 29 company-index pages even though only 10 detail fetches followed — and the cassette size scales with the company catalog, not with `--max-teas`. A future re-record against a larger vendor (e.g. yunnan-sourcing at 367 company pages) would produce a ~12× larger cassette before any trimming. Fix: terminate `_collect_tea_urls` early once `len(seen) >= max_teas_per_vendor`. Cheap; defer to a polish PR. Cross-link to follow-up #5 above (cassette size trajectory).
