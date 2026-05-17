@@ -15,6 +15,11 @@ shopify_vendors:
   yunnan_sourcing_com:
     display_name: "Yunnan Sourcing China"
     base_url: "https://yunnansourcing.com"
+    # KNOWN ISSUE: CF JA3 fingerprint block. httpx requests 403; curl
+    # succeeds from the same IP/UA in the same minute. Lowering rate does
+    # NOT fix this (verified 2026-05-16). Likely needs curl-cffi or HTTP/2
+    # in httpx. See spec §12 step-7 follow-up #9 for diagnosis +
+    # mitigation options.
     rate_limit_rps: 2
 
   white2tea:
