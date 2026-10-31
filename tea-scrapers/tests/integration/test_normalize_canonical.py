@@ -639,6 +639,61 @@ def test_base_listing_matches_earlier_seattle_listing(session: Session) -> None:
     assert r_base.product_id == r_sfx.product_id
 
 
+def test_whitespace_only_difference_is_exact_not_suffix_exact(session: Session) -> None:
+    """Review nit #1: a stored double-space title with no suffix must be EXACT.
+
+    Stored ``LOWER(canonical_name)`` is not whitespace-collapsed while
+    ``:norm`` is, so ``plain`` is false — but no suffix is involved on either
+    side, so this must not be labelled SUFFIX_EXACT.
+    """
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    pid = _seed_producer(session)
+    stored = _seed_product(
+        session,
+        f'Yi  Wu Mountain "Cha Gao {tok}" Instant Ripe Pu-erh Tea Resin',
+        producer_id=pid,
+        year=None,
+        weight=100,
+    )
+    result = matcher.match_or_create_product(
+        _make_fields(
+            f'Yi Wu Mountain "Cha Gao {tok}" Instant Ripe Pu-erh Tea Resin', weight_grams=100
+        ),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert result.decision == ProductDecision.EXACT
+    assert result.product_id == stored.product_id
+
+
+def test_nbsp_suffix_stripped_on_stored_side(session: Session) -> None:
+    """Review nit #4: the shared regex strips an NBSP-spaced suffix in Postgres too."""
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    pid = _seed_producer(session)
+    stored = _seed_product(
+        session,
+        f"2023 Bangdong Old Tree {tok} Sheng / Raw Puerh Tea\u00a0::\u00a0Seattle Inventory",
+        producer_id=pid,
+        year=2023,
+        weight=200,
+    )
+    result = matcher.match_or_create_product(
+        _make_fields(
+            f"2023 Bangdong Old Tree {tok} Sheng / Raw Puerh Tea",
+            harvest_year=2023,
+            weight_grams=200,
+        ),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert result.decision == ProductDecision.SUFFIX_EXACT
+    assert result.product_id == stored.product_id
+
+
 def test_suffix_stripped_before_trigram_similarity(session: Session) -> None:
     """Suffixed seed + near-miss base query: raw sim ≈0.74 (miss), stripped ≈0.95."""
     matcher = CanonicalMatcher()

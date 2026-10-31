@@ -60,7 +60,21 @@ from tea_scrapers.normalize.shopify_mapper import normalize_name, parse_weight_t
 # Postgres ARE syntax so the matcher can pass the very same string to
 # ``regexp_replace(canonical_name, :sfx, '', 'i')`` — one definition, two
 # engines. Always apply it case-insensitively.
-INVENTORY_SUFFIX_PATTERN = r"\s*::\s*seattle\s+inventory\s*$"
+#
+# Whitespace is an explicit class, NOT ``\s``: Python's ``\s`` matches
+# Unicode spaces (incl. NBSP U+00A0) while Postgres ``\s`` under the
+# ``C.UTF-8`` ctype matches ASCII whitespace only — verified 2026-10-31.
+# The class below is ASCII whitespace + NBSP and means the same in both.
+# (``normalize_name`` still collapses with Python ``\s``; a title carrying
+# some other exotic Unicode space would just miss the SQL stripped-exact arm
+# and fall through to trigram — a recall miss, never a false merge.)
+WHITESPACE_CLASS = r"[ \t\n\r\f\v\u00a0]"
+INVENTORY_SUFFIX_PATTERN = (
+    rf"{WHITESPACE_CLASS}*::{WHITESPACE_CLASS}*seattle{WHITESPACE_CLASS}+inventory"
+    rf"{WHITESPACE_CLASS}*$"
+)
+# Whitespace-run pattern for the SQL-side collapse that mirrors normalize_name.
+WHITESPACE_RUN_PATTERN = rf"{WHITESPACE_CLASS}+"
 _INVENTORY_SUFFIX_RE = re.compile(INVENTORY_SUFFIX_PATTERN, re.IGNORECASE)
 
 
@@ -105,14 +119,19 @@ class NameAttributes:
 _YEAR_MIN = 1900
 _YEAR_MAX = 2099
 
-# A standalone 4-digit token. Look-behind rejects digits / decimals / SKU-ish
-# joins (``D-27``, ``#1234``, ``1.5``); look-ahead rejects longer numbers and
-# decimals.
-_FOUR_DIGIT_RE = re.compile(r"(?<![\d.#/\-])(\d{4})(?![\d.])")
+# A standalone 4-digit token. Look-behinds reject longer digit runs, decimals
+# (``1.7542``) and slash/dash joins (``SKU-1234``, ``70/1200``); look-ahead
+# rejects longer numbers and decimals. ``#`` and ``No.`` prefixes ARE
+# allowed — "Dayi #7542" / "No.7572" are the classic way to write a recipe.
+_FOUR_DIGIT_RE = re.compile(r"(?<!\d)(?<!\d[.,])(?<![/\-])(\d{4})(?![\d.])")
 # Units that make a number a quantity, not a code: "1100ml", "1000g",
-# "1000 grams", "2000 kg". Checked against the text right after the token.
+# "1000 grams", "2000 kg", elevations ("1800m", "2400 meters", "6000 ft",
+# "1800 masl") and ages ("1000 Year Old", "1200 yrs"). Checked against the
+# text right after the token.
 _UNIT_AFTER_RE = re.compile(
-    r"\s*(?:g|grams?|gr|kg|kilos?|kilograms?|mg|ml|cc|pcs|pieces)\b", re.IGNORECASE
+    r"\s*(?:g|grams?|gr|kg|kilos?|kilograms?|mg|ml|cc|pcs|pieces"
+    r"|m|meters?|metres?|masl|ft|feet|years?|yrs?)\b",
+    re.IGNORECASE,
 )
 # Explicit recipe marker after the token, optionally across a closing quote:
 # "1815 Recipe", '"1815 Recipe"', "7542 recipe".
@@ -126,10 +145,15 @@ _SHOU_RE = re.compile(r"\b(?:shou|ripe)\b|熟", re.IGNORECASE)
 #   ye sheng (野生, "wild": "Jinggu Ye Sheng Cha"), shou mei (寿眉 white tea),
 #   sheng tai (生态, "ecological"), and potter / brand names on teaware
 #   ("Zhang Quan Sheng", "Huang Shou Zhen", "Guan Ren Sheng",
-#   "Ding Sheng Hao"). Removed before style detection.
+#   "Ding Sheng Hao"). Plus standard non-style phrases (code review
+#   2026-10-31): Fu Lu Shou (福禄寿 deities), Shou Xing (寿星), Wan Shou
+#   (万寿), Sheng Xiao / 生肖 (zodiac — "Year of the X" cakes), 生日
+#   (birthday). Removed before style detection.
 _STYLE_FALSE_POSITIVE_RE = re.compile(
     r"\bye\s+sheng\b|野生|\bshou\s+mei\b|寿眉|壽眉|\bsheng\s+tai\b|生态|生態"
-    r"|\bquan\s+sheng\b|\bren\s+sheng\b|\bshou\s+zhen\b|\bsheng\s+hao\b",
+    r"|\bquan\s+sheng\b|\bren\s+sheng\b|\bshou\s+zhen\b|\bsheng\s+hao\b"
+    r"|\bfu\s+lu\s+shou\b|\bshou\s+xing\b|\bwan\s+shou\b|\bsheng\s+xiao\b"
+    r"|生肖|生日",
     re.IGNORECASE,
 )
 
@@ -322,6 +346,8 @@ def check_attribute_guard(
 __all__ = [
     "INVENTORY_SUFFIX_PATTERN",
     "ONE_SIDED_POLICY",
+    "WHITESPACE_CLASS",
+    "WHITESPACE_RUN_PATTERN",
     "GuardAttributes",
     "GuardConflict",
     "GuardVerdict",

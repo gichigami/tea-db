@@ -47,8 +47,10 @@ from sqlalchemy.orm import Session
 
 from tea_scrapers.normalize.attributes import (
     INVENTORY_SUFFIX_PATTERN,
+    WHITESPACE_RUN_PATTERN,
     GuardAttributes,
     check_attribute_guard,
+    has_inventory_suffix,
     matching_key,
     strip_inventory_suffix,
 )
@@ -340,14 +342,15 @@ class CanonicalMatcher:
         # behavior is unchanged whenever a plain exact row exists.
         row = session.execute(
             text(
-                "SELECT product_id, (LOWER(canonical_name) = :norm) AS plain "
+                "SELECT product_id, (LOWER(canonical_name) = :norm) AS plain, "
+                "  (canonical_name ~* :sfx) AS stored_has_suffix "
                 "FROM product "
                 "WHERE producer_id IS NOT DISTINCT FROM :producer_id "
                 "  AND harvest_year IS NOT DISTINCT FROM :harvest_year "
                 "  AND weight_grams IS NOT DISTINCT FROM :weight_grams "
                 "  AND (LOWER(canonical_name) = :norm "
                 "       OR btrim(regexp_replace(LOWER(regexp_replace("
-                "            canonical_name, :sfx, '', 'i')), '\\s+', ' ', 'g')) = :key) "
+                "            canonical_name, :sfx, '', 'i')), :ws, ' ', 'g')) = :key) "
                 "ORDER BY plain DESC, product_id ASC LIMIT 1"
             ),
             {
@@ -356,11 +359,19 @@ class CanonicalMatcher:
                 "norm": fields.normalized_name,
                 "weight_grams": fields.weight_grams,
                 "sfx": sfx,
+                "ws": WHITESPACE_RUN_PATTERN,
                 "key": key,
             },
         ).first()
         if row is not None:
-            if row.plain:
+            # SUFFIX_EXACT only when a suffix was actually involved on either
+            # side. A non-plain hit without any suffix is a whitespace-only
+            # difference (stored "Yi  Wu ..." double space vs the collapsed
+            # :norm) — that's an ordinary exact match on the normalized name.
+            suffix_involved = row.stored_has_suffix or has_inventory_suffix(
+                fields.canonical_name
+            )
+            if row.plain or not suffix_involved:
                 return ProductMatchResult(
                     product_id=row.product_id, decision=ProductDecision.EXACT
                 )

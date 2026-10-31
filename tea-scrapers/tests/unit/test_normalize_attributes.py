@@ -13,6 +13,7 @@ import pytest
 from tea_scrapers.normalize.attributes import (
     INVENTORY_SUFFIX_PATTERN,
     ONE_SIDED_POLICY,
+    WHITESPACE_CLASS,
     GuardAttributes,
     OneSidedPolicy,
     TeaStyle,
@@ -103,6 +104,43 @@ def test_non_codes(name: str) -> None:
     assert parse_name_attributes(name).recipe_codes == frozenset()
 
 
+@pytest.mark.parametrize(
+    ("name", "codes"),
+    [
+        ("2010 Dayi #7542 Raw Pu-erh Tea Cake", {"7542"}),
+        ("2010 Dayi #7572 Ripe Pu-erh Tea Cake", {"7572"}),
+        ("2010 Menghai No.8582 Raw Pu-erh Tea Cake", {"8582"}),
+        ("2010 Menghai 7542-001 Raw Pu-erh Tea Cake", {"7542"}),  # batch suffix
+    ],
+)
+def test_hash_and_no_prefixed_codes(name: str, codes: set[str]) -> None:
+    assert parse_name_attributes(name).recipe_codes == frozenset(codes)
+
+
+def test_hash_prefixed_codes_conflict_in_guard() -> None:
+    v = check_attribute_guard(
+        _g("2010 Dayi #7542 Pu-erh Tea Cake"), _g("2010 Dayi #7572 Pu-erh Tea Cake")
+    )
+    assert [c.reason for c in v.conflicts] == ["recipe_code:mismatch"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "2019 Jingmai 1800m Old Arbor Raw Pu-erh",
+        "2019 Bulang 2400 meters Ancient Tree Raw",
+        "2019 Ailao 2400 metres Wild Black Tea",
+        "2019 Gaoshan 6000 ft Oolong",
+        "2018 Fengqing 1000 Year Old Tree Black Tea",
+        "2018 Fengqing 1200 yrs Tea Tree Black Tea",
+        "Sampler 0.7542 Decimal",
+        "SKU-7542 Teacup",
+    ],
+)
+def test_elevation_age_and_joined_numbers_are_not_codes(name: str) -> None:
+    assert parse_name_attributes(name).recipe_codes == frozenset()
+
+
 def test_explicit_recipe_marker_wins_over_year_range() -> None:
     # Synthetic: a year-shaped number explicitly labelled as a recipe.
     a = parse_name_attributes('2015 Factory "2001 Recipe" Ripe Brick')
@@ -161,10 +199,22 @@ def test_style(name: str, style: TeaStyle | None) -> None:
         'Jian Shui Clay "Fish" Teapot by Zhang Quan Sheng',
         'Jian Shui Clay "Qiu Yi" Teapot by Huang Shou Zhen',
         'Jian Shui Clay "Guan Ren Sheng" Teapot by Xiao Xi Cao Tang',
+        # Code-review false positives (2026-10-31).
+        'Jian Shui Clay "Fu Lu Shou" Teapot',
+        "Shou Xing Gong Teacup",
+        "Wan Shou Long Jianshui Teapot",
+        "2026 生肖 Horse Zodiac Black Tea Cake",
+        "2026 Sheng Xiao Horse Zodiac Black Tea Cake",
+        "生日 Gift Tin Black Tea",
     ],
 )
 def test_style_false_positives_suppressed(name: str) -> None:
     assert parse_name_attributes(name).style is None
+
+
+def test_zodiac_and_deity_phrases_do_not_mask_real_markers() -> None:
+    assert parse_name_attributes("2026 生肖 Horse Ripe Pu-erh Cake").style is TeaStyle.SHOU
+    assert parse_name_attributes('"Fu Lu Shou" Raw Pu-erh Tea Cake').style is TeaStyle.SHENG
 
 
 def test_ye_sheng_does_not_mask_a_real_marker() -> None:
@@ -253,8 +303,15 @@ def test_non_inventory_suffixes_untouched(name: str) -> None:
 
 def test_suffix_pattern_is_postgres_compatible_subset() -> None:
     # The same string is passed to Postgres ``regexp_replace(..., 'i')``;
-    # keep it to \s, literals, quantifiers and $ (no Python-only syntax).
-    assert re.fullmatch(r"[\\sa-z:*+$]+", INVENTORY_SUFFIX_PATTERN)
+    # keep it to the explicit whitespace class, literals, quantifiers and $
+    # (no ``\\s`` — its meaning differs between Python and PG C.UTF-8).
+    assert "\\s" not in INVENTORY_SUFFIX_PATTERN
+    rest = INVENTORY_SUFFIX_PATTERN.replace(WHITESPACE_CLASS, "")
+    assert re.fullmatch(r"[a-z:*+$]+", rest)
+
+
+def test_suffix_strip_handles_nbsp() -> None:
+    assert strip_inventory_suffix("X\u00a0::\u00a0Seattle\u00a0Inventory") == "X"
 
 
 def test_suffix_does_not_change_attributes() -> None:
