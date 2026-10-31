@@ -175,6 +175,15 @@ def _parse_weight_from_option(option_text: str | None) -> int | None:
     return None
 
 
+def parse_weight_text(text: str | None) -> int | None:
+    """Public entry to the option-string weight grammar (g / grams / kg, multipack).
+
+    Used by :mod:`tea_scrapers.normalize.attributes` so name-attribute parsing
+    shares this module's single weight grammar instead of growing a second one.
+    """
+    return _parse_weight_from_option(text)
+
+
 def _to_grams(num: float, unit: str) -> int:
     u = unit.lower()
     if u in ("kg", "kilogram", "kilograms"):
@@ -439,4 +448,5 @@ __all__ = [
     "ProductFields",
     "map_payload_to_products",
     "normalize_name",
+    "parse_weight_text",
 ]

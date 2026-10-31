@@ -53,7 +53,7 @@ The scrapers spec is the only complete v1 spec. The rest are stubs. Drafting fol
       _Owner: tech-lead_
 - [ ] **H.1 Hand-labeled pair set + trigram baseline** — producer + product pairs (agent-proposed labels, owner-reviewed); trigram baseline precision / recall. **In progress.**
       _Owner: qa-engineer_
-- [ ] **H.2 Attribute-guard parser + suffix near-dup fix** — parse recipe code / sheng-shou / year / weight; fix `":: Seattle Inventory"`-style suffix near-duplicates. **In progress.**
+- [ ] **H.2 Attribute-guard parser + suffix near-dup fix** — parse recipe code / sheng-shou / year / weight; fix `":: Seattle Inventory"`-style suffix near-duplicates. **Implemented 2026-10-31, pending code-reviewer pass:** `normalize/attributes.py` (parser + guard + `ONE_SIDED_POLICY`, provisional all-`VETO` per spec §12 hybrid sub-q #7) wired into the trigram product matcher (`veto_created` decision + `guard_vetoes` stats); suffix-stripped matching key (`suffix_exact` decision; raw title still stored); AMBIGUOUS_GAP fall-through test added (silver polish #7). One-sided policy re-check waits on H.1 labeled set.
       _Owner: data-engineer_
 - [ ] **H.3 Embedder module** — `Embedder` protocol, cache keyed by `(model, revision, text_hash)`, fake embedder for tests; §11 new-dep justification (`sentence-transformers` + `torch` vs `FlagEmbedding`).
       _Owner: ml-engineer_ — depends on H.1 (eval harness)

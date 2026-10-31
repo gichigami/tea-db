@@ -4,11 +4,16 @@ The product matcher follows the 4-step ladder from §8:
 
 1. Exact match on ``(producer_id, harvest_year, lower(canonical_name),
    weight_grams)`` — using ``IS NOT DISTINCT FROM`` to make nullable
-   comparisons match cleanly.
+   comparisons match cleanly. Falls back to the suffix-stripped matching
+   key (``SUFFIX_EXACT``) so ``"... :: Seattle Inventory"`` joins its base.
 2. Trigram similarity ≥0.85 on ``canonical_name`` filtered by
    ``producer_id``. Driven by the ``%`` operator with a session-scoped
    ``set_limit(0.85)`` so the GIN trigram index actually fires (a
    ``similarity()`` predicate would not).
+2.5 **Attribute guard** (ROADMAP H.2; :mod:`attributes`): each trigram
+   candidate whose parsed recipe code or sheng/shou conflicts with the
+   query (mismatch, or one-sided per ``ONE_SIDED_POLICY``) is vetoed. If
+   every candidate is vetoed → create (``VETO_CREATED``).
 3. **Ambiguous** (≥2 candidates within 0.10 of each other) → V1 stub:
    we don't have an LLM tiebreaker yet (ml-engineer V1.5), so we log
    the ambiguity, bump a counter, and **fall through to step 4**.
@@ -40,6 +45,13 @@ import structlog
 from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
+from tea_scrapers.normalize.attributes import (
+    INVENTORY_SUFFIX_PATTERN,
+    GuardAttributes,
+    check_attribute_guard,
+    matching_key,
+    strip_inventory_suffix,
+)
 from tea_scrapers.normalize.shopify_mapper import (
     ProducerHint,
     ProductFields,
@@ -61,15 +73,41 @@ AMBIGUOUS_GAP = 0.10
 
 class ProductDecision(str, Enum):
     EXACT = "exact"
+    # Exact on the suffix-stripped matching key (e.g. a ``:: Seattle
+    # Inventory`` re-listing joining its base listing). ROADMAP H.2.
+    SUFFIX_EXACT = "suffix_exact"
     TRIGRAM = "trigram"
     CREATED = "created"
     AMBIGUOUS_CREATED = "ambiguous_created"
+    # Trigram produced candidates but the attribute guard vetoed all of them.
+    # A confident non-match, not an ambiguity — does NOT affect exit code.
+    VETO_CREATED = "veto_created"
+
+
+# Decisions that insert a new ``product`` row (for stats bucketing).
+CREATED_DECISIONS = frozenset(
+    {
+        ProductDecision.CREATED,
+        ProductDecision.AMBIGUOUS_CREATED,
+        ProductDecision.VETO_CREATED,
+    }
+)
+
+
+@dataclass(frozen=True)
+class GuardVeto:
+    """One trigram candidate rejected by the attribute guard."""
+
+    candidate_product_id: int
+    similarity: float
+    reasons: tuple[str, ...]  # e.g. ("style:mismatch",)
 
 
 @dataclass
 class ProductMatchResult:
     product_id: int
     decision: ProductDecision
+    guard_vetoes: tuple[GuardVeto, ...] = ()
 
 
 def _nfc(s: str) -> str:
@@ -283,79 +321,157 @@ class CanonicalMatcher:
         region_id: int | None,
         session: Session,
     ) -> ProductMatchResult:
-        """Match the (producer, year, name, weight) tuple → existing or new product."""
+        """Match the (producer, year, name, weight) tuple → existing or new product.
+
+        Matching uses :func:`attributes.matching_key` (inventory suffix such
+        as ``" :: Seattle Inventory"`` stripped) on BOTH sides; the stored
+        ``canonical_name`` of a created row is still the raw vendor title.
+        """
+        sfx = INVENTORY_SUFFIX_PATTERN
+        key = matching_key(fields.canonical_name)
+        match_name = strip_inventory_suffix(fields.canonical_name)
+
         # Step 1: exact 4-tuple.
         # ``IS NOT DISTINCT FROM`` treats NULL == NULL as true. Required
         # because producer_id / harvest_year / weight_grams may all be NULL.
+        # Second OR-arm: suffix-stripped, whitespace-collapsed key on the
+        # stored side (mirrors ``matching_key``; the suffix regex string is
+        # shared with Python). Plain hits win the ORDER BY so pre-H.2
+        # behavior is unchanged whenever a plain exact row exists.
         row = session.execute(
             text(
-                "SELECT product_id FROM product "
+                "SELECT product_id, (LOWER(canonical_name) = :norm) AS plain "
+                "FROM product "
                 "WHERE producer_id IS NOT DISTINCT FROM :producer_id "
                 "  AND harvest_year IS NOT DISTINCT FROM :harvest_year "
-                "  AND LOWER(canonical_name) = :norm "
                 "  AND weight_grams IS NOT DISTINCT FROM :weight_grams "
-                "ORDER BY product_id ASC LIMIT 1"
+                "  AND (LOWER(canonical_name) = :norm "
+                "       OR btrim(regexp_replace(LOWER(regexp_replace("
+                "            canonical_name, :sfx, '', 'i')), '\\s+', ' ', 'g')) = :key) "
+                "ORDER BY plain DESC, product_id ASC LIMIT 1"
             ),
             {
                 "producer_id": producer_id,
                 "harvest_year": fields.harvest_year,
                 "norm": fields.normalized_name,
                 "weight_grams": fields.weight_grams,
+                "sfx": sfx,
+                "key": key,
             },
         ).first()
         if row is not None:
-            return ProductMatchResult(product_id=row.product_id, decision=ProductDecision.EXACT)
+            if row.plain:
+                return ProductMatchResult(
+                    product_id=row.product_id, decision=ProductDecision.EXACT
+                )
+            self._log.info(
+                "silver_match_suffix_stripped",
+                name=fields.canonical_name,
+                producer_id=producer_id,
+                product_id=row.product_id,
+            )
+            return ProductMatchResult(
+                product_id=row.product_id, decision=ProductDecision.SUFFIX_EXACT
+            )
 
         # Step 2: trigram on canonical_name filtered by producer. Producer is
         # nullable; if we have no producer hint, restrict to producer-less
         # rows so we don't cross-pollinate against rows with strong producer
         # identity (e.g. "Mountain Shadow" by Crimson Lotus must not match
         # a producer-less name collision from a different vendor's catalog).
+        #
+        # Similarity is computed on the suffix-stripped stored name against
+        # the suffix-stripped query. The WHERE keeps a GIN-indexable
+        # superset (``%`` OR the suffix regex, both ``gin_trgm_ops``-able)
+        # and then rechecks ``%`` on the stripped expression.
         self._ensure_trgm_limit(session)
 
-        if producer_id is not None:
-            sim_rows = session.execute(
-                text(
-                    "SELECT product_id, canonical_name, "
-                    "  similarity(canonical_name, :name) AS sim "
-                    "FROM product "
-                    "WHERE producer_id = :producer_id "
-                    "  AND canonical_name % :name "
-                    "  AND harvest_year IS NOT DISTINCT FROM :harvest_year "
-                    "  AND weight_grams IS NOT DISTINCT FROM :weight_grams "
-                    "ORDER BY sim DESC, product_id ASC LIMIT 5"
-                ),
-                {
-                    "producer_id": producer_id,
-                    "name": fields.canonical_name,
-                    "harvest_year": fields.harvest_year,
-                    "weight_grams": fields.weight_grams,
-                },
-            ).all()
-        else:
-            sim_rows = session.execute(
-                text(
-                    "SELECT product_id, canonical_name, "
-                    "  similarity(canonical_name, :name) AS sim "
-                    "FROM product "
-                    "WHERE producer_id IS NULL "
-                    "  AND canonical_name % :name "
-                    "  AND harvest_year IS NOT DISTINCT FROM :harvest_year "
-                    "  AND weight_grams IS NOT DISTINCT FROM :weight_grams "
-                    "ORDER BY sim DESC, product_id ASC LIMIT 5"
-                ),
-                {
-                    "name": fields.canonical_name,
-                    "harvest_year": fields.harvest_year,
-                    "weight_grams": fields.weight_grams,
-                },
-            ).all()
+        producer_clause = (
+            "producer_id = :producer_id" if producer_id is not None else "producer_id IS NULL"
+        )
+        sim_rows = session.execute(
+            text(
+                "SELECT product_id, canonical_name, harvest_year, weight_grams, "
+                "  similarity(regexp_replace(canonical_name, :sfx, '', 'i'), :name) AS sim "
+                "FROM product "
+                f"WHERE {producer_clause} "
+                "  AND (canonical_name % :name OR canonical_name ~* :sfx) "
+                "  AND regexp_replace(canonical_name, :sfx, '', 'i') % :name "
+                "  AND harvest_year IS NOT DISTINCT FROM :harvest_year "
+                "  AND weight_grams IS NOT DISTINCT FROM :weight_grams "
+                "ORDER BY sim DESC, product_id ASC LIMIT 5"
+            ),
+            {
+                "producer_id": producer_id,
+                "name": match_name,
+                "sfx": sfx,
+                "harvest_year": fields.harvest_year,
+                "weight_grams": fields.weight_grams,
+            },
+        ).all()
+
+        # Step 2.5: attribute guard (spec §12 hybrid step 2). Any parsed-and-
+        # conflicting recipe code / sheng-shou (or year / weight — already
+        # SQL-blocked here, but the guard is shared with the hybrid path)
+        # vetoes the candidate before ambiguity / reuse is considered.
+        vetoes: list[GuardVeto] = []
+        if sim_rows:
+            query_attrs = GuardAttributes.from_name(
+                fields.canonical_name,
+                harvest_year=fields.harvest_year,
+                weight_grams=fields.weight_grams,
+            )
+            surviving = []
+            for r in sim_rows:
+                verdict = check_attribute_guard(
+                    query_attrs,
+                    GuardAttributes.from_name(
+                        r.canonical_name,
+                        harvest_year=r.harvest_year,
+                        weight_grams=r.weight_grams,
+                    ),
+                )
+                if verdict.vetoed:
+                    vetoes.append(
+                        GuardVeto(
+                            candidate_product_id=r.product_id,
+                            similarity=float(r.sim),
+                            reasons=tuple(c.reason for c in verdict.conflicts),
+                        )
+                    )
+                else:
+                    surviving.append(r)
+            if vetoes:
+                self._log.info(
+                    "silver_match_guard_veto",
+                    name=fields.canonical_name,
+                    producer_id=producer_id,
+                    vetoed=[
+                        (v.candidate_product_id, round(v.similarity, 4), list(v.reasons))
+                        for v in vetoes
+                    ],
+                    surviving=len(surviving),
+                )
+            if not surviving:
+                created = self._create_product(
+                    fields,
+                    producer_id=producer_id,
+                    region_id=region_id,
+                    session=session,
+                )
+                return ProductMatchResult(
+                    product_id=created,
+                    decision=ProductDecision.VETO_CREATED,
+                    guard_vetoes=tuple(vetoes),
+                )
+            sim_rows = surviving
 
         if sim_rows:
             top = sim_rows[0]
             top_sim = float(top.sim)
             # Step 3: ambiguity check — log + fall through to over-create.
-            # (V1 LLM tiebreaker stub: see §12 OQ.)
+            # (V1 LLM tiebreaker stub: see §12 OQ.) Only guard-surviving
+            # candidates count toward ambiguity.
             if (
                 len(sim_rows) >= 2
                 and top_sim < AMBIGUOUS_TOP_CEILING
@@ -378,11 +494,15 @@ class CanonicalMatcher:
                     session=session,
                 )
                 return ProductMatchResult(
-                    product_id=created, decision=ProductDecision.AMBIGUOUS_CREATED
+                    product_id=created,
+                    decision=ProductDecision.AMBIGUOUS_CREATED,
+                    guard_vetoes=tuple(vetoes),
                 )
             # Single dominant candidate — reuse.
             return ProductMatchResult(
-                product_id=top.product_id, decision=ProductDecision.TRIGRAM
+                product_id=top.product_id,
+                decision=ProductDecision.TRIGRAM,
+                guard_vetoes=tuple(vetoes),
             )
 
         # Step 4: create.
@@ -457,7 +577,9 @@ class CanonicalMatcher:
 __all__ = [
     "AMBIGUOUS_GAP",
     "AMBIGUOUS_TOP_CEILING",
+    "CREATED_DECISIONS",
     "CanonicalMatcher",
+    "GuardVeto",
     "ProductDecision",
     "ProductMatchResult",
     "TRIGRAM_THRESHOLD",

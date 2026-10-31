@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from tea_scrapers.cli import cli
@@ -419,6 +419,59 @@ def test_crimson_lotus_spellbound_stag_weight_from_title_not_grams(
             f"Spellbound Stag weight_grams should be 200 (title fallback), "
             f"got {product.weight_grams} — variant.grams=210 must NOT be trusted"
         )
+
+
+def test_crimson_lotus_seattle_inventory_joins_base_listing(
+    pg_engine, tmp_path: Path, pg_cleanup: dict[str, list[str]]
+) -> None:
+    """ROADMAP H.2: ``:: Seattle Inventory`` re-listings share the base product.
+
+    The Crimson Lotus golden carries two real pairs: "Mountain Shadow" and
+    "Rise of the Dark Lotus" (200g Cake, each as base + Seattle listing).
+    Each pair must resolve to ONE ``product`` for the 200g variant, with two
+    ``vendor_product`` rows (one per Shopify listing), and the stored
+    ``canonical_name`` must be one of the raw vendor titles (never a
+    synthesized stripped string).
+    """
+    vendor = "crimson_lotus"
+    _stage_goldens(tmp_path, vendors=[vendor])
+    _common_cleanup_setup(pg_cleanup, [vendor])
+
+    runner = CliRunner()
+    assert _invoke_load(runner, tmp_path).exit_code == 0
+    norm_result = _invoke_normalize(runner, raw_dir=tmp_path, source=vendor)
+    assert norm_result.exit_code in (0, 1)
+    pg_cleanup["scrape_runs"].append(_latest_normalizer_run(pg_engine).run_id)
+
+    titles_by_pid: dict[str, str] = {}
+    for line in (GOLDEN_DIR / f"{vendor}.jsonl").read_text("utf-8").splitlines():
+        if line.strip():
+            payload = json.loads(line)["payload"]
+            titles_by_pid[str(payload["id"])] = payload["title"]
+
+    factory = sessionmaker(bind=pg_engine, expire_on_commit=False, future=True)
+    with factory() as sess:
+        vendor_row = sess.execute(
+            select(Vendor).where(Vendor.source_key == vendor)
+        ).scalar_one()
+        for stem in ('"Mountain Shadow"', '"Rise of the Dark Lotus"'):
+            pids = [pid for pid, t in titles_by_pid.items() if stem in t]
+            assert len(pids) == 2, f"golden should hold base + Seattle for {stem}"
+            vps = sess.execute(
+                select(VendorProduct).where(
+                    VendorProduct.vendor_id == vendor_row.vendor_id,
+                    or_(
+                        *(VendorProduct.vendor_external_id.like(f"{pid}:%") for pid in pids)
+                    ),
+                )
+            ).scalars().all()
+            products = [sess.get(Product, vp.product_id) for vp in vps]
+            p200 = {p.product_id for p in products if p.weight_grams == 200}
+            assert len(p200) == 1, f"{stem}: 200g base + Seattle should share a product, got {p200}"
+            vps_200 = [vp for vp, p in zip(vps, products) if p.weight_grams == 200]
+            assert len(vps_200) == 2, f"{stem}: expected 2 vendor_products on the 200g product"
+            stored = sess.get(Product, next(iter(p200))).canonical_name
+            assert stored in {titles_by_pid[pid] for pid in pids}
 
 
 def test_rerun_is_a_counted_noop(

@@ -45,6 +45,7 @@ from sqlalchemy.orm import Session
 
 from tea_scrapers.config import VendorConfig, load_shopify_vendors
 from tea_scrapers.normalize.canonical import (
+    CREATED_DECISIONS,
     CanonicalMatcher,
     ProductDecision,
 )
@@ -85,6 +86,12 @@ class NormalizeStats:
     by_decision: dict[str, int] = field(
         default_factory=lambda: {d.value: 0 for d in ProductDecision}
     )
+    # Attribute-guard vetoes (ROADMAP H.2): one count per vetoed trigram
+    # candidate, plus a breakdown by ``"<attribute>:<mismatch|one_sided>"``.
+    # Informational — vetoes do not change the exit code (a veto is a
+    # confident non-match, unlike ``ambiguous_created``).
+    guard_vetoes: int = 0
+    guard_vetoes_by_reason: dict[str, int] = field(default_factory=dict)
     tier_promoted_a: int = 0
     tier_demoted_b: int = 0
     tier_demoted_c: int = 0
@@ -103,6 +110,7 @@ class NormalizeStats:
                 "inserted_vendor_product": 0,
                 "inserted_snapshot": 0,
                 "snapshot_skipped_dedup": 0,
+                "guard_vetoes": 0,
             }
             self.by_source[source] = bucket
         return bucket
@@ -191,6 +199,8 @@ class SilverNormalizer:
             inserted_snapshot=stats.inserted_snapshot,
             snapshot_skipped_dedup=stats.snapshot_skipped_dedup,
             by_decision=stats.by_decision,
+            guard_vetoes=stats.guard_vetoes,
+            guard_vetoes_by_reason=stats.guard_vetoes_by_reason,
             tier_promoted_a=stats.tier_promoted_a,
             tier_demoted_b=stats.tier_demoted_b,
             tier_demoted_c=stats.tier_demoted_c,
@@ -361,10 +371,14 @@ class SilverNormalizer:
         stats.by_decision[match_result.decision.value] = (
             stats.by_decision.get(match_result.decision.value, 0) + 1
         )
-        if match_result.decision in (
-            ProductDecision.CREATED,
-            ProductDecision.AMBIGUOUS_CREATED,
-        ):
+        for veto in match_result.guard_vetoes:
+            stats.guard_vetoes += 1
+            bucket["guard_vetoes"] += 1
+            for reason in veto.reasons:
+                stats.guard_vetoes_by_reason[reason] = (
+                    stats.guard_vetoes_by_reason.get(reason, 0) + 1
+                )
+        if match_result.decision in CREATED_DECISIONS:
             stats.inserted_product += 1
             bucket["inserted_product"] += 1
         self._touched_product_ids.add(match_result.product_id)

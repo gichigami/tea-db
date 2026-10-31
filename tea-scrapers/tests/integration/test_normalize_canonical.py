@@ -20,8 +20,11 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from tea_scrapers.normalize.attributes import ONE_SIDED_POLICY, OneSidedPolicy
 from tea_scrapers.normalize.canonical import (
     AMBIGUOUS_GAP,
+    AMBIGUOUS_TOP_CEILING,
+    TRIGRAM_THRESHOLD,
     CanonicalMatcher,
     ProductDecision,
 )
@@ -328,6 +331,21 @@ def test_product_below_threshold_creates_new(session: Session) -> None:
     assert r_far.decision == ProductDecision.CREATED
 
 
+def _digits() -> str:
+    """Per-test unique token made of digits only.
+
+    A hex ``uuid`` suffix can share letter trigrams with the single-letter
+    words these fixtures vary on ("A" / "B" / "C"), which made the
+    pre-H.2 top-ceiling test flaky (sim flipped across 0.85 depending on
+    the suffix's first hex char). Digit-only words cannot collide.
+    """
+    return str(uuid.uuid4().int % 10**10).zfill(10)
+
+
+def _sim(session: Session, a: str, b: str) -> float:
+    return float(session.execute(text("SELECT similarity(:a, :b)"), {"a": a, "b": b}).scalar_one())
+
+
 def test_product_two_high_similarity_candidates_reuse_via_top_ceiling(
     session: Session,
 ) -> None:
@@ -337,46 +355,335 @@ def test_product_two_high_similarity_candidates_reuse_via_top_ceiling(
     string, so pg_trgm similarity against the query ("C") is ≥ 0.95 for both —
     which trips ``AMBIGUOUS_TOP_CEILING`` (dominant-candidate reuse) BEFORE the
     ``AMBIGUOUS_GAP`` fall-through can fire. The matcher must reuse one of the
-    seeds, not over-create. (The AMBIGUOUS_GAP fall-through path — top_sim in
-    [0.85, 0.95) with second candidate within 0.10 — needs its own test fixture
-    with more divergent inputs; tracked as a §12 silver-normalizer polish item.)
+    seeds, not over-create.
 
     Seeds are inserted via the ORM directly because feeding them through the
     matcher would dedup the second seed against the first via trigram.
     """
     matcher = CanonicalMatcher()
-    suffix = uuid.uuid4().hex[:8]
-    seed_a = Product(
-        canonical_name=f"Ambiguous A {suffix}",
-        producer_id=None,
-        harvest_year=2024,
-        weight_grams=357,
-    )
-    seed_b = Product(
-        canonical_name=f"Ambiguous B {suffix}",
-        producer_id=None,
-        harvest_year=2024,
-        weight_grams=357,
-    )
+    tok = _digits()
+    stem = "Ambiguous Ceiling Shared Long Product Name Yiwu Gushu Spring Harvest Selection"
+    seed_a = Product(canonical_name=f"{stem} A {tok}", harvest_year=2024, weight_grams=357)
+    seed_b = Product(canonical_name=f"{stem} B {tok}", harvest_year=2024, weight_grams=357)
     session.add_all([seed_a, seed_b])
     session.flush()
-    assert seed_a.product_id != seed_b.product_id
+    query = f"{stem} C {tok}"
+    # Precondition: both seeds clear the ceiling (self-validating fixture).
+    assert _sim(session, seed_a.canonical_name, query) >= AMBIGUOUS_TOP_CEILING
+    assert _sim(session, seed_b.canonical_name, query) >= AMBIGUOUS_TOP_CEILING
 
-    # Query with a name within 0.10 trigram of both seeds.
-    ambiguous_query = _make_fields(
-        f"Ambiguous C {suffix}",
-        harvest_year=2024,
-        weight_grams=357,
-    )
     result = matcher.match_or_create_product(
-        ambiguous_query, producer_id=None, region_id=None, session=session
+        _make_fields(query, harvest_year=2024, weight_grams=357),
+        producer_id=None,
+        region_id=None,
+        session=session,
     )
-    # Both seeds have top_sim ≥ AMBIGUOUS_TOP_CEILING (0.95) against the query,
-    # so the matcher must reuse the top hit rather than over-create. An
-    # AMBIGUOUS_CREATED decision here would indicate the top-ceiling check
+    # An AMBIGUOUS_CREATED decision here would indicate the top-ceiling check
     # has regressed (it must precede the gap check).
     assert result.decision == ProductDecision.TRIGRAM
     assert result.product_id in (seed_a.product_id, seed_b.product_id)
+
+
+def test_product_ambiguous_gap_falls_through_to_over_create(session: Session) -> None:
+    """top_sim in [0.85, 0.95) and runner-up within AMBIGUOUS_GAP → over-create.
+
+    Fills the §12 silver-normalizer polish #7 gap: the V1 LLM-tiebreaker stub
+    path (``AMBIGUOUS_CREATED``) had no test.
+    """
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    seed_a = Product(
+        canonical_name=f"Gap Yiwu Spring Selection A {tok}", harvest_year=2024, weight_grams=357
+    )
+    seed_b = Product(
+        canonical_name=f"Gap Yiwu Spring Selection B {tok}", harvest_year=2024, weight_grams=357
+    )
+    session.add_all([seed_a, seed_b])
+    session.flush()
+    query = f"Gap Yiwu Spring Selection C {tok}"
+    sims = sorted(
+        (_sim(session, seed_a.canonical_name, query), _sim(session, seed_b.canonical_name, query)),
+        reverse=True,
+    )
+    assert TRIGRAM_THRESHOLD <= sims[1] <= sims[0] < AMBIGUOUS_TOP_CEILING
+    assert sims[0] - sims[1] < AMBIGUOUS_GAP
+
+    result = matcher.match_or_create_product(
+        _make_fields(query, harvest_year=2024, weight_grams=357),
+        producer_id=None,
+        region_id=None,
+        session=session,
+    )
+    assert result.decision == ProductDecision.AMBIGUOUS_CREATED
+    assert result.product_id not in (seed_a.product_id, seed_b.product_id)
+    assert result.guard_vetoes == ()
+
+
+# ---------------------------------------------------------------------------
+# Attribute guard (ROADMAP H.2)
+# ---------------------------------------------------------------------------
+
+
+def _seed_producer(session: Session) -> int:
+    name = f"Guard Test Producer {uuid.uuid4().hex[:8]}"
+    p = Producer(canonical_name=name, aliases=[name.lower()])
+    session.add(p)
+    session.flush()
+    return p.producer_id
+
+
+def _seed_product(
+    session: Session, name: str, *, producer_id: int | None, year: int | None, weight: int | None
+) -> Product:
+    p = Product(
+        canonical_name=name, producer_id=producer_id, harvest_year=year, weight_grams=weight
+    )
+    session.add(p)
+    session.flush()
+    return p
+
+
+def test_guard_vetoes_sheng_shou_mismatch(session: Session) -> None:
+    """Real YS pair (cassette): same name except Raw vs Ripe, trigram ≈0.90.
+
+    Pre-H.2 the trigram step merged these. The guard must veto and create.
+    """
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    pid = _seed_producer(session)
+    raw = _seed_product(
+        session,
+        f'2024 Yunnan Sourcing "Bang Wai Mountain {tok}" Raw Pu-erh Tea Cake',
+        producer_id=pid,
+        year=2024,
+        weight=357,
+    )
+    query = f'2024 Yunnan Sourcing "Bang Wai Mountain {tok}" Ripe Pu-erh Tea Cake'
+    assert _sim(session, raw.canonical_name, query) >= TRIGRAM_THRESHOLD
+
+    result = matcher.match_or_create_product(
+        _make_fields(query, harvest_year=2024, weight_grams=357),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert result.decision == ProductDecision.VETO_CREATED
+    assert result.product_id != raw.product_id
+    assert [(v.candidate_product_id, v.reasons) for v in result.guard_vetoes] == [
+        (raw.product_id, ("style:mismatch",))
+    ]
+    # The raw vendor title is what got stored.
+    assert session.get(Product, result.product_id).canonical_name == query
+
+
+def test_guard_vetoes_recipe_code_mismatch(session: Session) -> None:
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    pid = _seed_producer(session)
+    seed = _seed_product(
+        session,
+        f'2022 Menghai "7572" Ripe Pu-erh Tea Cake {tok}',
+        producer_id=pid,
+        year=2022,
+        weight=357,
+    )
+    query = f'2022 Menghai "7542" Ripe Pu-erh Tea Cake {tok}'
+    assert _sim(session, seed.canonical_name, query) >= TRIGRAM_THRESHOLD
+
+    result = matcher.match_or_create_product(
+        _make_fields(query, harvest_year=2022, weight_grams=357),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert result.decision == ProductDecision.VETO_CREATED
+    assert result.guard_vetoes[0].reasons == ("recipe_code:mismatch",)
+
+
+def test_guard_veto_removes_candidate_before_ambiguity_check(session: Session) -> None:
+    """Without the guard these two candidates are ambiguous (gap < 0.10).
+
+    The Raw seed is vetoed, leaving one Ripe candidate → reuse (TRIGRAM).
+    """
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    pid = _seed_producer(session)
+    ripe = _seed_product(
+        session,
+        f'2024 Yunnan Sourcing "Bang Wai Mountain {tok}" Ripe Puerh Tea Cake',
+        producer_id=pid,
+        year=2024,
+        weight=357,
+    )
+    raw = _seed_product(
+        session,
+        f'2024 Yunnan Sourcing "Bang Wai Mountain {tok}" Raw Pu-erh Tea Cake',
+        producer_id=pid,
+        year=2024,
+        weight=357,
+    )
+    query = f'2024 Yunnan Sourcing "Bang Wai Mountain {tok}" Ripe Pu-erh Tea Cake'
+    s_ripe = _sim(session, ripe.canonical_name, query)
+    s_raw = _sim(session, raw.canonical_name, query)
+    assert TRIGRAM_THRESHOLD <= s_raw < s_ripe < AMBIGUOUS_TOP_CEILING
+    assert s_ripe - s_raw < AMBIGUOUS_GAP  # would be AMBIGUOUS_CREATED pre-guard
+
+    result = matcher.match_or_create_product(
+        _make_fields(query, harvest_year=2024, weight_grams=357),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert result.decision == ProductDecision.TRIGRAM
+    assert result.product_id == ripe.product_id
+    assert [v.candidate_product_id for v in result.guard_vetoes] == [raw.product_id]
+
+
+def test_guard_one_sided_style_vetoes_by_default(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One side says Ripe, the other is silent → veto under the default policy.
+
+    Flipping ``ONE_SIDED_POLICY["style"]`` to PASS lets the same pair reuse,
+    proving the module constant is the single knob (spec §12 sub-q #7).
+    """
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    pid = _seed_producer(session)
+    seed = _seed_product(
+        session,
+        f"2019 Menghai Classic {tok} Pu-erh Tea Cake",
+        producer_id=pid,
+        year=2019,
+        weight=357,
+    )
+    query = f"2019 Menghai Classic {tok} Ripe Pu-erh Tea Cake"
+    assert _sim(session, seed.canonical_name, query) >= TRIGRAM_THRESHOLD
+    fields = _make_fields(query, harvest_year=2019, weight_grams=357)
+
+    vetoed = matcher.match_or_create_product(
+        fields, producer_id=pid, region_id=None, session=session
+    )
+    assert vetoed.decision == ProductDecision.VETO_CREATED
+    assert vetoed.guard_vetoes[0].reasons == ("style:one_sided",)
+    session.delete(session.get(Product, vetoed.product_id))
+    session.flush()
+
+    monkeypatch.setitem(ONE_SIDED_POLICY, "style", OneSidedPolicy.PASS)
+    passed = matcher.match_or_create_product(
+        fields, producer_id=pid, region_id=None, session=session
+    )
+    assert passed.decision == ProductDecision.TRIGRAM
+    assert passed.product_id == seed.product_id
+
+
+# ---------------------------------------------------------------------------
+# Inventory-suffix near-duplicates (ROADMAP H.2)
+# ---------------------------------------------------------------------------
+
+
+def test_seattle_inventory_listing_matches_base_listing(session: Session) -> None:
+    """Base first, then ``:: Seattle Inventory`` twin → SUFFIX_EXACT reuse."""
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    pid = _seed_producer(session)
+    base = f'2025 "Mountain Shadow {tok}" Shou / Ripe Puerh Tea - 200g Cake'
+    r_base = matcher.match_or_create_product(
+        _make_fields(base, harvest_year=2025, weight_grams=200),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert r_base.decision == ProductDecision.CREATED
+
+    suffixed = base + " :: Seattle Inventory"
+    r_sfx = matcher.match_or_create_product(
+        _make_fields(suffixed, harvest_year=2025, weight_grams=200),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert r_sfx.decision == ProductDecision.SUFFIX_EXACT
+    assert r_sfx.product_id == r_base.product_id
+    # Stored name is untouched (raw title preserved).
+    assert session.get(Product, r_base.product_id).canonical_name == base
+
+
+def test_base_listing_matches_earlier_seattle_listing(session: Session) -> None:
+    """Reverse order: suffixed row already stored, base arrives → reuse it."""
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    pid = _seed_producer(session)
+    # Real double-space-before-:: shape from the cassette.
+    suffixed = f"2023 Bangdong Old Tree {tok} Sheng / Raw Puerh Tea  :: Seattle Inventory"
+    r_sfx = matcher.match_or_create_product(
+        _make_fields(suffixed, harvest_year=2023, weight_grams=200),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert r_sfx.decision == ProductDecision.CREATED
+    assert session.get(Product, r_sfx.product_id).canonical_name == suffixed
+
+    r_base = matcher.match_or_create_product(
+        _make_fields(
+            f"2023 Bangdong Old Tree {tok} Sheng / Raw Puerh Tea",
+            harvest_year=2023,
+            weight_grams=200,
+        ),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert r_base.decision == ProductDecision.SUFFIX_EXACT
+    assert r_base.product_id == r_sfx.product_id
+
+
+def test_suffix_stripped_before_trigram_similarity(session: Session) -> None:
+    """Suffixed seed + near-miss base query: raw sim ≈0.74 (miss), stripped ≈0.95."""
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    pid = _seed_producer(session)
+    seed = _seed_product(
+        session,
+        f'2025 "Mountain Shadow {tok}" Shou / Ripe Puerh Tea - 200g Cake :: Seattle Inventory',
+        producer_id=pid,
+        year=2025,
+        weight=200,
+    )
+    query = f'2025 "Mountain Shadow {tok}" Shou / Ripe Puerh Tea - 200g Cakes'
+    assert _sim(session, seed.canonical_name, query) < TRIGRAM_THRESHOLD  # pre-H.2 miss
+
+    result = matcher.match_or_create_product(
+        _make_fields(query, harvest_year=2025, weight_grams=200),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert result.decision == ProductDecision.TRIGRAM
+    assert result.product_id == seed.product_id
+
+
+def test_suffix_match_still_blocked_by_weight(session: Session) -> None:
+    """Stripping the suffix never bypasses the (year, weight) block."""
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    pid = _seed_producer(session)
+    base = f'2025 "Mountain Shadow {tok}" Shou / Ripe Puerh Tea - 200g Cake'
+    r20 = matcher.match_or_create_product(
+        _make_fields(base, harvest_year=2025, weight_grams=20),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    r200 = matcher.match_or_create_product(
+        _make_fields(base + " :: Seattle Inventory", harvest_year=2025, weight_grams=200),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert r200.decision == ProductDecision.CREATED
+    assert r200.product_id != r20.product_id
 
 
 # ---------------------------------------------------------------------------
@@ -394,3 +701,65 @@ def test_trgm_threshold_set_on_session(session: Session) -> None:
 
 def test_ambiguous_gap_constant_is_0_10() -> None:
     assert AMBIGUOUS_GAP == pytest.approx(0.10)
+
+
+# ---------------------------------------------------------------------------
+# Veto visibility in normalize run stats (ROADMAP H.2)
+# ---------------------------------------------------------------------------
+
+
+class _NullTracker:
+    def record_success(self, n: int = 1) -> None:
+        pass
+
+    def record_error(self, msg: str) -> None:
+        pass
+
+
+def test_guard_vetoes_surface_in_normalize_stats(session: Session) -> None:
+    """Raw then Ripe twin through the silver runner → veto counted in stats."""
+    import contextlib
+    import datetime as dt
+
+    from tea_scrapers.normalize.silver import NormalizeStats, SilverNormalizer
+    from tea_scrapers.storage.models import RawProductSnapshot
+
+    tok = _digits()
+    source = f"guard_stats_{tok}"
+    normalizer = SilverNormalizer(
+        since=dt.date(2026, 1, 1),
+        tracker=_NullTracker(),  # type: ignore[arg-type]
+        run_id="test",
+        session_factory=lambda: contextlib.nullcontext(session),
+        vendor_configs={},
+    )
+
+    def _row(pid: int, style: str) -> RawProductSnapshot:
+        return RawProductSnapshot(
+            source=source,
+            external_id=str(pid),
+            scraped_at=dt.datetime(2026, 5, 16, tzinfo=dt.UTC),
+            run_id="test",
+            payload_hash=f"h{pid}",
+            payload={
+                "id": pid,
+                "title": f'2024 Yunnan Sourcing "Bang Wai Mountain {tok}" {style} Pu-erh Tea Cake',
+                "vendor": f"Guard Stats Producer {tok}",
+                "product_type": f"{style} Pu-erh Tea",
+                "tags": [],
+                "variants": [
+                    {"id": pid * 10, "option1": "357 Grams", "available": True, "price": "50.00"}
+                ],
+            },
+        )
+
+    stats = NormalizeStats()
+    normalizer._process_bronze_row(_row(1, "Raw"), stats, session)
+    normalizer._process_bronze_row(_row(2, "Ripe"), stats, session)
+
+    assert stats.by_decision[ProductDecision.CREATED.value] == 1
+    assert stats.by_decision[ProductDecision.VETO_CREATED.value] == 1
+    assert stats.inserted_product == 2
+    assert stats.guard_vetoes == 1
+    assert stats.guard_vetoes_by_reason == {"style:mismatch": 1}
+    assert stats.by_source[source]["guard_vetoes"] == 1

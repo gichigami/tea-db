@@ -340,6 +340,8 @@ def normalize_cmd(
 
     # Exit 1 if anything ambiguous or skipped showed up — operators should
     # eyeball those before the run becomes "green" in dashboards.
+    # ``veto_created`` / ``guard_vetoes`` (attribute guard, ROADMAP H.2) are
+    # deliberately excluded: a veto is a confident non-match, not ambiguity.
     partial = (
         stats.parse_errors
         + stats.insert_errors
