@@ -725,14 +725,18 @@ CREATE TABLE scrape_run (
 
 ### Canonical product ID matching
 
-A separate concern handled in `normalize/canonical.py`. Given a raw vendor product, match it to an existing `product` row or create a new one. Order of checks:
+A separate concern handled in `normalize/canonical.py`. Given a raw vendor product, match it to an existing `product` row or create a new one.
+
+**V1 baseline (trigram, shipped in step 6).** Order of checks:
 
 1. Exact match on `(producer_id, harvest_year, normalized_name, weight_grams)` → reuse
-2. Trigram similarity above threshold (0.85) on `canonical_name` filtered by producer → candidate
-3. LLM tiebreaker for ambiguous candidates → reuse or create
+2. Trigram similarity above threshold (0.85) on `canonical_name` filtered by producer (and, as implemented, by `harvest_year` + `weight_grams` via `IS NOT DISTINCT FROM`) → candidate
+3. LLM tiebreaker for ambiguous candidates → reuse or create (V1 ships a conservative stub that over-creates; see §12 silver normalizer follow-up #5)
 4. Otherwise create new `product` row
 
-Trigram index supports the fuzzy match step efficiently. Build this on day 1.
+The producer matcher follows the same shape (NFC norm → alias → exact → trigram → create) but has no ambiguity-gap check today. Trigram index supports the fuzzy match step efficiently; it was built on day 1 (`idx_product_name_trgm` in 001, `idx_producer_name_trgm` in 002) and stays.
+
+**Approved evolution: hybrid matcher (owner-resolved 2026-10-31; see §12 "Hybrid canonical matcher").** Both the product and producer matchers move to: exact → attribute guard (parsed recipe code / sheng-shou / year / weight; any mismatch vetoes the pair) → candidate generation from trigram **and** embedding kNN → hybrid score with thresholds calibrated on a hand-labeled pair set → LLM tiebreaker for the ambiguous band → create. Name embeddings are local BGE-M3, stored as `halfvec(1024)` in a new `name_embedding` table (migration 003), separate from the description-level `product_embedding` table above. The hybrid path ships behind a matcher-strategy config flag (`trigram | hybrid`, default `trigram`) in shadow mode; the default flips only if hybrid beats the trigram baseline on the labeled set. Trigram is the baseline and a permanent candidate generator, not a deprecated path. Until the flip, the V1 baseline above is the normative behavior.
 
 ---
 
@@ -862,7 +866,7 @@ Things agents should NOT do:
   2. **`variant.grams` tare-in-packaging quirk.** Codified in `shopify_mapper.py::_parse_weight_from_option` and verified against the YS-US golden record (`"100 Grams"` option → `variant.grams=125`). Future engineers may be tempted to "simplify" by trusting `variant.grams` directly; the comment in the mapper exists to prevent that. Cross-link: the unit test `test_normalize_shopify_mapper.py::test_option1_overrides_variant_grams` asserts the divergence stays.
   3. **Currency=USD V1 hardcode.** All three current vendors quote USD; the silver fact column `product_snapshot.currency` is filled with the literal `"USD"`. Breaks the moment a non-US Shopify vendor lands (e.g. a Taiwanese / UK source). Resolution: lift to `VendorConfig.currency` and have the mapper read it. Owner: scraper-engineer at first non-USD vendor.
   4. **Cultivar + region extraction for non-YS vendors.** YS structured tags (`Producer_*`, `Region_*`, `Cultivar_*`) drive most of `shopify_mapper.py`'s field extraction today. white2tea and Crimson Lotus emit free-form tags and short product titles; the mapper falls back to `payload.vendor` + start-of-title regex but does not extract region or cultivar at all. Deferred to ml-engineer V1.5 (LLM-driven extraction over `body_html`).
-  5. **LLM tiebreaker stub at matcher step 3.** `CanonicalMatcher.match_or_create_product` currently logs `silver_match_ambiguity` and falls through to over-create when 2+ trigram candidates cluster within 0.10 similarity. The spec §8 calls for an LLM tiebreaker here; V1 stub is conservative (over-create is recoverable, false-merge is not). Cross-link: ROADMAP step 7+ where ml-engineer picks this up.
+  5. **LLM tiebreaker stub at matcher step 3.** `CanonicalMatcher.match_or_create_product` currently logs `silver_match_ambiguity` and falls through to over-create when 2+ trigram candidates cluster within 0.10 similarity. The spec §8 calls for an LLM tiebreaker here; V1 stub is conservative (over-create is recoverable, false-merge is not). Cross-link: ROADMAP step 7+ where ml-engineer picks this up. **Update 2026-10-31:** now scoped under the §12 "Hybrid canonical matcher" entry (sub-question #4); the tiebreaker lands as step 5 of that plan.
   6. **Tier-sweep perf.** V1's `normalize/tier.py::assign_tiers` runs one CTE-based UPDATE per normalize run, scoped to the touched product IDs. Fine at thousands of products. At V2 scale (curated catalog tier D + multi-vendor cross-product, ~100K+ products), the CTE will start to dominate; the obvious optimization is a denormalized `product.last_available_at` column maintained on snapshot insert. Decision owner: data-engineer at first slow-run signal.
   7. **`--since` semantic divergence.** The bronze loader filters on partition date in the JSONL path (`source=.../date=YYYY-MM-DD/...`); the silver normalizer filters on the in-row `raw_product_snapshot.scraped_at::date`. Both accept `--since YYYY-MM-DD` but they mean slightly different things. Acceptable in V1 (the two values are equal in practice — `JsonlWriter` derives the partition from `scraped_at`), but document so operators don't get confused when they diverge under, say, a re-load of older partitions.
   8. **`product.canonical_name` not UNIQUE is intentional.** The matcher key is the 4-tuple `(producer_id, harvest_year, normalized_name, weight_grams)`; canonical names can legitimately repeat across e.g. different weight variants. A comment in `canonical.py` flags this; future readers should not "fix" this by adding a unique constraint.
@@ -916,3 +920,40 @@ Things agents should NOT do:
      **Revised recommended sequence:** (2a) for ~30-min cheap test → (2b) + (2c) if 2a fails (high probability). Skip (3) and (4) entirely unless 2a+2b+2c all fail (very unlikely). (5) parallel always.
 
      **Vendors.yaml state (2026-05-16 end of session):** `yunnan_sourcing_com.rate_limit_rps` reverted to `2` from the failed `0.5` experiment, with an inline `# KNOWN ISSUE` comment pointing back to this follow-up. The rate setting is correct as-is for V1; the fix lives in the HTTP-client layer, not the rate-limit layer.
+
+- **Hybrid canonical matcher (trigram → trigram + embedding + attribute guard)** (filed 2026-10-31 by tech-lead, owner of decision: project owner, **status: RESOLVED — Option B approved**; sub-questions below remain OPEN). Supersedes the "trigram only" reading of §8 "Canonical product ID matching"; §8 now describes trigram as the V1 baseline and this as the approved evolution.
+
+  **Decision.** Move both `match_or_create_product` and `match_or_create_producer` to a hybrid matcher. Target flow:
+  1. Exact match (unchanged from V1).
+  2. **Attribute guard** — parse recipe code (e.g. Dayi `7262` / `7572`), sheng vs shou, harvest year, and weight from both sides; any parsed-and-mismatched attribute vetoes the pair regardless of downstream score. Treatment of attributes present on one side only is open (sub-question #7).
+  3. **Candidate generation** — union of trigram candidates (existing `%` + `set_limit` path) and embedding kNN over `name_embedding`.
+  4. **Hybrid score** with an auto-match threshold and a review band, both calibrated on a hand-labeled pair set.
+  5. **LLM tiebreaker** for the ambiguous band only.
+  6. Otherwise create.
+
+  Embedding model: **local BGE-M3** (MIT license; dense + sparse heads; strong Chinese coverage), stored as `halfvec(1024)` in a **new `name_embedding` table** keyed by entity with `model`, `revision`, and `text_hash` columns so re-embedding is cache-addressable and model upgrades are detectable. This is deliberately separate from the description-level `product_embedding` table. Rollout is shadow-mode behind a matcher-strategy config flag (`trigram | hybrid`, default `trigram`); flip the default only if hybrid beats the trigram baseline P/R on the labeled set. **Trigram is not removed.**
+
+  **Rationale.**
+  - Trigram fails on cross-script and romanization variants (大红袍 / Da Hong Pao; Laobanzhang / Lao Ban Zhang), which matter most for the producer matcher and for the historical → current pivot (design §5, §6 #7) — a false non-match there splits a legendary tea from its current listing.
+  - Dense embeddings collapse exactly the tokens that distinguish tea products: recipe codes (`7262` vs `7572`), years, and weights embed near-identically. Hence the attribute guard is **mandatory**, not an optimization; the hybrid path must not ship without it.
+  - Merges are irreversible downstream (snapshot chains, reviews, and quote-evidence attach to the merged `product_id`); over-creates are recoverable. Precision-first: target ≥ ~0.98 precision on auto-match, everything below goes to the review band / tiebreaker / create. Same conservatism as the V1 over-create stub (silver follow-up #5).
+  - The product trigram step already blocks on producer + year + weight (`IS NOT DISTINCT FROM`), so the guard generalizes an existing invariant rather than inventing one. The producer matcher has no ambiguity-gap check today; the hybrid path adds one.
+
+  **Phased steps** (tracked in `ROADMAP.md` under "Hybrid canonical matcher"):
+  0. tech-lead — this OQ + §8 amendment.
+  1. qa-engineer — hand-labeled producer + product pair set (agent-proposed labels, owner-reviewed) + trigram baseline precision/recall.
+  2. data-engineer — attribute-guard parser + fix for `":: Seattle Inventory"`-style suffix near-duplicates.
+  3. ml-engineer — embedder module: `Embedder` protocol, cache keyed by `(model, revision, text_hash)`, deterministic fake embedder for tests; new-dependency justification per §11 (`sentence-transformers` + `torch` vs `FlagEmbedding`).
+  4. data-engineer — migration `003` (`name_embedding`) + matcher-strategy config flag.
+  5. ml-engineer + qa-engineer — threshold calibration (auto-match ≥ ~0.98 precision + review band).
+  6. data-engineer — shadow-mode run on the bulk seed; log trigram-vs-hybrid disagreements for owner review.
+  7. qa-engineer + code-reviewer — tests (fixture vectors, no network, no model download in CI) + review.
+
+  **Still-open sub-questions** (not resolved by the Option B decision; resolve in the step noted):
+  1. **Exact scan vs HNSW for name kNN** (owner: data-engineer, step 4). At V1 scale (low thousands of products, hundreds of producers) an exact `ORDER BY embedding <=> :q` scan, especially pre-filtered by producer, may beat HNSW on both recall and simplicity. Decide on measured latency; don't build the index by reflex.
+  2. **Hybrid scoring formula** (owner: ml-engineer, step 5). Weighted linear blend of trigram similarity + cosine vs reciprocal rank fusion (RRF). RRF is threshold-hostile (rank-based scores don't calibrate to a precision target); a weighted blend is easier to calibrate but needs per-signal normalization. Pick on the labeled set.
+  3. **Does BGE-M3 sparse eventually replace trigram?** (owner: ml-engineer + tech-lead, post-step-6). Not in this decision — trigram stays as baseline and candidate generator. Revisit only with shadow-mode evidence.
+  4. **LLM tiebreaker scope** (owner: ml-engineer, step 5). Cross-link silver normalizer follow-up #5: the existing stub over-creates. Decide whether the tiebreaker sees only the review band, whether it may override an attribute-guard veto (recommended: never), and which provider (ties to the design §10 / ROADMAP "LLM provider for extraction" OQ).
+  5. **Two embedding stacks** (owner: tech-lead + ml-engineer, before V.6). Design §10 "Embedding model: API vs local" leans API (`text-embedding-3-large`) for **description** embeddings; this decision puts **name** embeddings on local BGE-M3. Two stacks is acceptable if justified (names are short, multilingual, high-volume re-embeds; descriptions feed the recommender), but the design §10 OQ must be answered knowing BGE-M3 is already in the dependency set.
+  6. **`product_embedding` dimension/comment mismatch** (owner: data-engineer + ml-engineer, before V.6). `alembic/versions/001_initial.py:254-268` and `storage/models.py:233-245` (and the §8 DDL above) declare `VECTOR(1536)` with the comment "text-embedding-3-large dim", but `text-embedding-3-large` defaults to 3072 dims (1536 is `text-embedding-3-small`'s default, or 3-large truncated via the `dimensions` parameter). Also note pgvector's HNSW limit is 2000 dims for `vector` (4000 for `halfvec`), so 3072 un-truncated cannot be HNSW-indexed as `vector`. Correct the comment or the dimension when V.6 picks the description model; not touched by migration 003.
+  7. **Attribute guard: one-sided attributes** (owner: data-engineer, step 2; calibrated in step 5). The V1 trigram step blocks with `IS NOT DISTINCT FROM`, so a NULL `harvest_year` / `weight_grams` on one side never matches a populated one. The guard must decide whether "parsed on one side, absent on the other" vetoes (V1-equivalent, precision-first) or passes to scoring (recall-friendlier for vendors whose titles omit year/weight — white2tea, Crimson Lotus per silver follow-up #4). Default to veto until the labeled set shows the recall cost.

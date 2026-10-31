@@ -45,6 +45,27 @@ The scrapers spec is the only complete v1 spec. The rest are stubs. Drafting fol
 - [ ] **10. Cron integration** — shell script + crontab entry as `scripts/crontab.example`
       _Owner: scraper-engineer_
 
+### Hybrid canonical matcher (amends step 6; scrapers spec §8 + §12 "Hybrid canonical matcher")
+
+**Decision (2026-10-31, project owner; recorded by tech-lead): Option B — hybrid matcher.** Product + producer matchers move from pure trigram to exact → attribute guard (recipe code / sheng-shou / year / weight; mismatch vetoes) → trigram ∪ embedding-kNN candidates → calibrated hybrid score → LLM tiebreaker (ambiguous band) → create. Local BGE-M3 name embeddings as `halfvec(1024)` in a new `name_embedding` table (`model` / `revision` / `text_hash`), separate from description-level `product_embedding`. Shadow mode behind a `trigram | hybrid` flag (default `trigram`); flip only if hybrid beats the trigram baseline on the labeled set. Trigram is not removed. Precision-first (auto-match ≥ ~0.98) because merges are irreversible. Sub-questions #1–#7 in the spec §12 entry stay open. Runs in parallel with steps 8–9; does not block EDA.
+
+- [x] **H.0 OQ + spec amendment** — §8 reframed (trigram = V1 baseline, hybrid = approved evolution); §12 entry filed with decision, rationale, phased plan, 7 open sub-questions; design §10 embedding OQ scoped to descriptions.
+      _Owner: tech-lead_
+- [ ] **H.1 Hand-labeled pair set + trigram baseline** — producer + product pairs (agent-proposed labels, owner-reviewed); trigram baseline precision / recall. **In progress.**
+      _Owner: qa-engineer_
+- [ ] **H.2 Attribute-guard parser + suffix near-dup fix** — parse recipe code / sheng-shou / year / weight; fix `":: Seattle Inventory"`-style suffix near-duplicates. **In progress.**
+      _Owner: data-engineer_
+- [ ] **H.3 Embedder module** — `Embedder` protocol, cache keyed by `(model, revision, text_hash)`, fake embedder for tests; §11 new-dep justification (`sentence-transformers` + `torch` vs `FlagEmbedding`).
+      _Owner: ml-engineer_ — depends on H.1 (eval harness)
+- [ ] **H.4 Migration 003 `name_embedding` + matcher-strategy flag** — `trigram | hybrid`, default `trigram`.
+      _Owner: data-engineer_ — depends on H.3 (dim / model metadata)
+- [ ] **H.5 Threshold calibration** — auto-match ≥ ~0.98 precision + review band; pick scoring formula (weighted vs RRF); scope LLM tiebreaker.
+      _Owners: ml-engineer + qa-engineer_ — depends on H.1–H.4
+- [ ] **H.6 Shadow-mode run on bulk seed** — log trigram-vs-hybrid disagreements for owner review; default flips only on a labeled-set win.
+      _Owner: data-engineer_ — depends on H.5
+- [ ] **H.7 Tests + review** — fixture vectors, no network / no model download in CI; code-reviewer pass.
+      _Owners: qa-engineer + code-reviewer_ — runs alongside H.2–H.6, closes after H.6
+
 Ingest steps 1–9 are all prerequisites for **EDA** (which now precedes SPEC: ontology — see next section). After step 6, drafting of SPEC: recommender, SPEC: reliability, SPEC: ui, and SPEC: testing can proceed in parallel with steps 7–9.
 
 ---
@@ -96,4 +117,5 @@ Tracked verbatim in:
 Highlights blocking near-term work:
 - Ontology build vs buy — re-evaluated at EDA.4 with corpus evidence in hand, then resolved in SPEC: ontology. No longer a blocker for near-term work; the EDA corpus + frequency analysis is the deciding input.
 - LLM provider for extraction — blocks SPEC: extraction
+- Hybrid matcher sub-questions (spec §12 "Hybrid canonical matcher" #1–#7) — scoring formula + one-sided-attribute policy block H.5; two-embedding-stacks + `product_embedding` dim mismatch must be settled before V.6
 - Framework choice for UI (Next.js leaning) — blocks SPEC: ui

@@ -323,7 +323,7 @@ The recommender service distinguishes between shoppable mode (hard filter on ava
 ## 10. Open Questions
 
 - **Build vs buy on the ontology**: curate a tea-specific one or fork/extend an existing flavor lexicon (SCA-style, wine lexicons)? Currently leaning curate.
-- **Embedding model**: API (text-embedding-3-large) or local (BGE-large)? API for V1, revisit for cost as volume scales.
+- **Embedding model**: API (text-embedding-3-large) or local (BGE-large)? API for V1, revisit for cost as volume scales. (Scope: **description** embeddings for the recommender. **Name** embeddings for canonical matching were separately resolved 2026-10-31 as local BGE-M3 — see scrapers spec §12 "Hybrid canonical matcher", sub-question #5 on running two embedding stacks.)
 - **Privacy/auth model for personal palate vector storage**: TBD.
 - **Vendor permission**: proactive contact with YS/white2tea, or rely on robots.txt and public endpoints? Probably proactive, this is a small world. Especially when ingesting full historical catalogs.
 - **Display platform**: web (Next.js?), iOS (Chaizi stack), or both? Likely web for V1; iOS opportunity once palate vector model is proven.
