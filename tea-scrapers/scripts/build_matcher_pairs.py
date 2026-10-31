@@ -29,6 +29,13 @@ Usage::
 
     python scripts/build_matcher_pairs.py            # write fixtures
     python scripts/build_matcher_pairs.py --check    # verify fixtures are current
+
+Owner review: copy ``low_confidence_review.csv`` to ``owner_review.csv`` (same
+dir), fill ``owner_label`` (``match`` / ``non_match``) and optionally
+``owner_note`` for any pair (high-confidence rows may be appended too), then
+re-run. Decisions are applied by pair_id with a names-unchanged check and set
+``review_status`` to ``owner_confirmed`` / ``owner_corrected``. Keep the spec
+lists append-only so existing pair_ids stay stable.
 """
 
 from __future__ import annotations
@@ -1269,26 +1276,64 @@ def producer_norm_simple(s: str) -> str:
 # ======================================================================
 
 
+OWNER_REVIEW = OUT_DIR / "owner_review.csv"
+
+
+def load_owner_review() -> dict[str, dict[str, str]]:
+    """Owner decisions, keyed by pair_id (same columns as low_confidence_review.csv).
+
+    Only rows whose ``owner_label`` is ``match`` / ``non_match`` count. Each row's
+    left/right names must still equal the generated pair's — a guard against
+    applying a decision to a pair whose id shifted after a generator edit.
+    """
+    if not OWNER_REVIEW.exists():
+        return {}
+    with open(OWNER_REVIEW, encoding="utf-8", newline="") as fh:
+        rows = [r for r in csv.DictReader(fh) if (r.get("owner_label") or "").strip()]
+    out = {}
+    for r in rows:
+        lab = r["owner_label"].strip()
+        if lab not in ("match", "non_match"):
+            raise SystemExit(f"owner_review.csv {r['pair_id']}: owner_label must be match|non_match")
+        out[r["pair_id"]] = r
+    return out
+
+
 def materialize() -> tuple[list[LabeledPair], list[LabeledPair]]:
     out: dict[str, list[LabeledPair]] = {"product": [], "producer": []}
     counters = {"product": 0, "producer": 0}
     prefix = {"product": "prod", "producer": "prdc"}
+    review = load_owner_review()
     for s in SPECS:
         counters[s.entity] += 1
+        pid = f"{prefix[s.entity]}-{counters[s.entity]:04d}"
+        label, conf, status, rationale = s.label, s.conf, "agent_proposed", s.rationale
+        if pid in review:
+            r = review.pop(pid)
+            if (r["left_name"], r["right_name"]) != (s.left.name, s.right.name):
+                raise SystemExit(f"owner_review.csv {pid}: names no longer match the generated pair")
+            owner = r["owner_label"].strip()
+            status = "owner_confirmed" if owner == label else "owner_corrected"
+            label, conf = owner, "high"
+            if (r.get("owner_note") or "").strip():
+                rationale = f"{rationale} [owner: {r['owner_note'].strip()}]"
         out[s.entity].append(
             LabeledPair(
-                pair_id=f"{prefix[s.entity]}-{counters[s.entity]:04d}",
+                pair_id=pid,
                 entity=s.entity,  # type: ignore[arg-type]
                 left=s.left,
                 right=s.right,
-                label=s.label,  # type: ignore[arg-type]
-                label_confidence=s.conf,  # type: ignore[arg-type]
+                label=label,  # type: ignore[arg-type]
+                label_confidence=conf,  # type: ignore[arg-type]
                 category=s.category,
                 tags=_auto_tags(s),
                 source=_source(s),  # type: ignore[arg-type]
-                rationale=s.rationale,
+                rationale=rationale,
+                review_status=status,  # type: ignore[arg-type]
             )
         )
+    if review:
+        raise SystemExit(f"owner_review.csv has unknown pair_ids: {sorted(review)}")
     return out["product"], out["producer"]
 
 
@@ -1306,7 +1351,9 @@ def render(products: list[LabeledPair], producers: list[LabeledPair]) -> dict[st
     def attrs(p: LabeledPair, s: PairSide) -> str:
         if p.entity == "producer":
             return ""
-        return f"{s.producer} | {s.harvest_year} | {s.weight_grams}g"
+        year = s.harvest_year if s.harvest_year is not None else "year?"
+        weight = f"{s.weight_grams}g" if s.weight_grams is not None else "weight?"
+        return f"{s.producer} | {year} | {weight}"
 
     for p in products + producers:
         if p.label_confidence != "low":

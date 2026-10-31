@@ -40,7 +40,7 @@ the threshold against ``canonical.TRIGRAM_THRESHOLD`` to catch drift.
 CLI::
 
     python -m tea_scrapers.eval.matcher_eval [--database-url URL] [--json OUT]
-        [--confidence all|high] [--fixtures-dir DIR]
+        [--confidence all|high|low] [--product-policy v1|h2] [--fixtures-dir DIR]
 """
 
 from __future__ import annotations
@@ -82,16 +82,23 @@ class PairScorer(Protocol):
     def score(self, pairs: Sequence[tuple[str, str]]) -> list[float]: ...
 
 
+def _identity(s: str) -> str:
+    return s
+
+
 @dataclass(frozen=True)
 class MatchPolicy:
     """Non-score part of a matcher decision.
 
-    ``gate(pair) -> veto reason | None``; ``exact(pair) -> bool``.
+    ``gate(pair) -> veto reason | None``; ``exact(pair) -> bool``;
+    ``prepare(name) -> str`` is applied to both names before scoring (H.2
+    scores suffix-stripped names; V1 scores raw ``canonical_name``).
     """
 
     name: str
     gate: Callable[[LabeledPair], str | None]
     exact: Callable[[LabeledPair], bool]
+    prepare: Callable[[str], str] = _identity
 
 
 class TrigramScorer:
@@ -172,9 +179,7 @@ def v1_producer_policy() -> MatchPolicy:
     )
 
 
-def v1_product_policy(producer_same: Callable[[str, str], bool]) -> MatchPolicy:
-    """V1 product ladder: block on producer / year / weight, then exact name."""
-
+def _v1_blocking(producer_same: Callable[[str, str], bool]) -> Callable[[LabeledPair], str | None]:
     def gate(p: LabeledPair) -> str | None:
         lp, rp = p.left.producer, p.right.producer
         if (lp is None) != (rp is None) or (lp and rp and not producer_same(lp, rp)):
@@ -186,10 +191,53 @@ def v1_product_policy(producer_same: Callable[[str, str], bool]) -> MatchPolicy:
             return "weight_grams"
         return None
 
+    return gate
+
+
+def v1_product_policy(producer_same: Callable[[str, str], bool]) -> MatchPolicy:
+    """V1 product ladder: block on producer / year / weight, then exact name."""
+
     def exact(p: LabeledPair) -> bool:
         return normalize_name(p.left.name) == normalize_name(p.right.name)
 
-    return MatchPolicy(name="v1_product", gate=gate, exact=exact)
+    return MatchPolicy(name="v1_product", gate=_v1_blocking(producer_same), exact=exact)
+
+
+def h2_product_policy(producer_same: Callable[[str, str], bool]) -> MatchPolicy:
+    """The LIVE matcher after H.2 (imports ``normalize.attributes``, not frozen).
+
+    Same SQL blocking as V1; exact step on the suffix-stripped ``matching_key``
+    (guard not applied to exact hits, as in ``canonical.py``); trigram on
+    suffix-stripped names; then the attribute guard (recipe code / sheng-shou;
+    one-sided policy from ``attributes.ONE_SIDED_POLICY``) vetoes candidates.
+    """
+    from tea_scrapers.normalize.attributes import (
+        GuardAttributes,
+        check_attribute_guard,
+        matching_key,
+        strip_inventory_suffix,
+    )
+
+    blocking = _v1_blocking(producer_same)
+
+    def exact(p: LabeledPair) -> bool:
+        return matching_key(p.left.name) == matching_key(p.right.name)
+
+    def gate(p: LabeledPair) -> str | None:
+        reason = blocking(p)
+        if reason is not None or exact(p):
+            return reason
+        verdict = check_attribute_guard(
+            GuardAttributes.from_name(
+                p.left.name, harvest_year=p.left.harvest_year, weight_grams=p.left.weight_grams
+            ),
+            GuardAttributes.from_name(
+                p.right.name, harvest_year=p.right.harvest_year, weight_grams=p.right.weight_grams
+            ),
+        )
+        return "guard:" + verdict.conflicts[0].reason if verdict.vetoed else None
+
+    return MatchPolicy(name="h2_product", gate=gate, exact=exact, prepare=strip_inventory_suffix)
 
 
 # ----------------------------------------------------------------------
@@ -304,8 +352,10 @@ class EvalReport:
         return d
 
 
-def score_pairs(pairs: Sequence[LabeledPair], scorer: PairScorer) -> list[float]:
-    return scorer.score([(p.left.name, p.right.name) for p in pairs])
+def score_pairs(
+    pairs: Sequence[LabeledPair], scorer: PairScorer, prepare: Callable[[str], str] = _identity
+) -> list[float]:
+    return scorer.score([(prepare(p.left.name), prepare(p.right.name)) for p in pairs])
 
 
 def evaluate(
@@ -389,24 +439,32 @@ def best_thresholds(rows: Sequence[dict[str, object]]) -> dict[str, object]:
 # ----------------------------------------------------------------------
 
 
+PRODUCT_POLICIES: dict[str, Callable[[Callable[[str, str], bool]], MatchPolicy]] = {
+    "v1": v1_product_policy,
+    "h2": h2_product_policy,
+}
+
+
 def run_v1_baseline(
     scorer: PairScorer,
     fixtures_dir: Path = DEFAULT_FIXTURES_DIR,
     *,
     confidence: str = "all",
     threshold: float = V1_TRIGRAM_THRESHOLD,
+    product_policy: str = "v1",
 ) -> dict[str, object]:
+    """Run the trigram baseline. ``product_policy='h2'`` evaluates the live H.2 ladder."""
     cached = CachedScorer(scorer)
     out: dict[str, object] = {"scorer": scorer.name, "confidence_filter": confidence}
     producer_same = v1_producer_same(cached)
     for entity, fname, policy in (
-        ("product", "product_pairs.jsonl", v1_product_policy(producer_same)),
+        ("product", "product_pairs.jsonl", PRODUCT_POLICIES[product_policy](producer_same)),
         ("producer", "producer_pairs.jsonl", v1_producer_policy()),
     ):
         pairs = load_pairs(fixtures_dir / fname)
         if confidence != "all":
             pairs = [p for p in pairs if p.label_confidence == confidence]
-        scores = score_pairs(pairs, cached)
+        scores = score_pairs(pairs, cached, policy.prepare)
         rep = evaluate(pairs, scores, policy, threshold, entity=entity, scorer_name=cached.name)
         rows = sweep(pairs, scores, policy, entity=entity, scorer_name=cached.name)
         out[entity] = {
@@ -478,13 +536,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     ap.add_argument("--fixtures-dir", type=Path, default=DEFAULT_FIXTURES_DIR)
     ap.add_argument("--confidence", choices=("all", "high", "low"), default="all")
+    ap.add_argument(
+        "--product-policy", choices=sorted(PRODUCT_POLICIES), default="v1",
+        help="v1 = frozen trigram baseline (ef1a0f6); h2 = live matcher incl. attribute guard",
+    )
     ap.add_argument("--json", type=Path, help="write the full result (incl. per-pair outcomes)")
     args = ap.parse_args(argv)
     if not args.database_url:
         print("error: --database-url or TEST_DATABASE_URL/DATABASE_URL required", file=sys.stderr)
         return 2
     result = run_v1_baseline(
-        TrigramScorer(args.database_url), args.fixtures_dir, confidence=args.confidence
+        TrigramScorer(args.database_url),
+        args.fixtures_dir,
+        confidence=args.confidence,
+        product_policy=args.product_policy,
     )
     print(render_text(result))
     if args.json:

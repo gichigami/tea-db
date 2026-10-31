@@ -23,6 +23,7 @@ from tea_scrapers.eval.matcher_eval import (
     V1_TRIGRAM_THRESHOLD,
     best_thresholds,
     evaluate,
+    h2_product_policy,
     producer_norm,
     sweep,
     v1_producer_policy,
@@ -242,3 +243,20 @@ def test_producer_policy_and_sweep() -> None:
     best = best_thresholds(rows)
     assert best["best_f1"]["threshold"] == 0.6
     assert best[f"lowest_threshold_with_precision_ge_{PRECISION_TARGET}"]["threshold"] == 0.6
+
+
+def test_h2_policy_strips_suffix_and_applies_guard() -> None:
+    """The live-H.2 policy: suffix-stripped exact key + recipe/style guard."""
+    pairs = [
+        _pp(1, "2017 Stargazer Sheng :: Seattle Inventory", "2017 Stargazer Sheng", "match"),
+        _pp(2, "2023 Menghai 7572 Ripe Cake", "2023 Menghai 7262 Ripe Cake", "non_match"),
+        _pp(3, "2023 Lao Man'e Raw Cake", "2023 Lao Man'e Ripe Cake", "non_match"),
+    ]
+    scorer = FakeScorer({})
+    policy = h2_product_policy(v1_producer_same(scorer))
+    assert policy.prepare("X :: Seattle Inventory") == "X"
+    rep = evaluate(pairs, [0.0, 0.95, 0.95], policy, 0.85, entity="product", scorer_name="fake")
+    assert [o.pred for o in rep.outcomes] == [True, False, False]
+    assert rep.outcomes[0].exact
+    assert rep.outcomes[1].veto == "guard:recipe_code:mismatch"
+    assert rep.outcomes[2].veto == "guard:style:mismatch"

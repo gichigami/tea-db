@@ -45,8 +45,9 @@ def test_trigram_scorer_orders_and_bounds(scorer: TrigramScorer) -> None:
     assert scorer.score([]) == []
 
 
-def test_v1_baseline_runs_end_to_end(scorer: TrigramScorer) -> None:
-    result = run_v1_baseline(scorer)
+@pytest.mark.parametrize("policy", ["v1", "h2"])
+def test_baseline_runs_end_to_end(scorer: TrigramScorer, policy: str) -> None:
+    result = run_v1_baseline(scorer, product_policy=policy)
     for entity in ("product", "producer"):
         block = result[entity]
         rep = block["at_threshold"]
