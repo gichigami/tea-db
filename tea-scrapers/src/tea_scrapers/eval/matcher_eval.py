@@ -274,7 +274,14 @@ class EvalReport:
     by_category: dict[str, Counts]
     by_confidence: dict[str, Counts]
     veto_reasons: dict[str, int]
+    vetoed_positives: int = 0
     outcomes: list[PairOutcome] = field(default_factory=list)
+
+    @property
+    def recall_ceiling(self) -> float | None:
+        """Best recall any threshold can reach given the gate's vetoes."""
+        pos = self.overall.positives
+        return (pos - self.vetoed_positives) / pos if pos else None
 
     def errors(self) -> list[PairOutcome]:
         return [o for o in self.outcomes if o.gold != o.pred]
@@ -289,6 +296,8 @@ class EvalReport:
             "by_category": {k: v.as_dict() for k, v in sorted(self.by_category.items())},
             "by_confidence": {k: v.as_dict() for k, v in sorted(self.by_confidence.items())},
             "veto_reasons": dict(sorted(self.veto_reasons.items())),
+            "vetoed_positives": self.vetoed_positives,
+            "recall_ceiling": _r(self.recall_ceiling),
         }
         if include_outcomes:
             d["outcomes"] = [asdict(o) for o in self.outcomes]
@@ -315,6 +324,7 @@ def evaluate(
     by_cat: dict[str, Counts] = {}
     by_conf: dict[str, Counts] = {}
     vetoes: dict[str, int] = {}
+    vetoed_pos = 0
     outcomes: list[PairOutcome] = []
     for p, s in zip(pairs, scores, strict=True):
         veto = policy.gate(p)
@@ -326,6 +336,7 @@ def evaluate(
         by_conf.setdefault(p.label_confidence, Counts()).add(gold, pred)
         if veto is not None:
             vetoes[veto] = vetoes.get(veto, 0) + 1
+            vetoed_pos += int(gold)
         outcomes.append(PairOutcome(p.pair_id, p.category, gold, pred, round(s, 4), veto, is_exact))
     return EvalReport(
         entity=entity,
@@ -336,6 +347,7 @@ def evaluate(
         by_category=by_cat,
         by_confidence=by_conf,
         veto_reasons=vetoes,
+        vetoed_positives=vetoed_pos,
         outcomes=outcomes,
     )
 
@@ -425,7 +437,10 @@ def render_text(result: dict[str, object]) -> str:
             f"FN={o['fn']} TN={o['tn']}  P={_fmt(o['precision'])} R={_fmt(o['recall'])} "
             f"F1={_fmt(o['f1'])}"
         )
-        lines.append(f"vetoes: {rep['veto_reasons']}")
+        lines.append(
+            f"vetoes: {rep['veto_reasons']}  vetoed positives={rep['vetoed_positives']} "
+            f"→ recall ceiling under this gate={_fmt(rep['recall_ceiling'])}"
+        )
         lines.append(f"{'category':34s} {'n':>4s} {'pos':>4s} {'TP':>3s} {'FP':>3s} "
                      f"{'FN':>3s} {'TN':>3s} {'P':>6s} {'R':>6s} {'F1':>6s} {'acc':>6s}")
         for cat, c in rep["by_category"].items():

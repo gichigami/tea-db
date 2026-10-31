@@ -140,11 +140,10 @@ def load_pairs(path: str | Path) -> list[LabeledPair]:
 def dump_pairs(pairs: Iterable[LabeledPair], path: str | Path) -> None:
     """Write pairs as canonical JSONL (sorted keys, UTF-8, one per line)."""
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
-        for p in pairs:
-            fh.write(
-                json.dumps(p.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
-                + "\n"
-            )
+        fh.writelines(
+            json.dumps(p.model_dump(mode="json"), ensure_ascii=False, sort_keys=True) + "\n"
+            for p in pairs
+        )
 
 
 __all__ = [

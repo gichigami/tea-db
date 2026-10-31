@@ -394,7 +394,7 @@ def strip_year(title: str) -> str:
 # ======================================================================
 
 
-def build_products() -> None:  # noqa: C901 - a long, flat list of curated specs
+def build_products() -> None:  # a long, flat list of curated specs
     cl, w2t, us, com = "cl", "w2t", "us", "com"
 
     # ------------------------------------------------------------------
@@ -569,14 +569,14 @@ def build_products() -> None:  # noqa: C901 - a long, flat list of curated specs
     # Attribute drift between storefronts on the same listing.
     drift = [
         ('2024 Yunnan Sourcing "Naka Beauty" Old Arbor Raw Pu-erh Tea Cake', 250, 250, "match", "low",
-         "Title says 2024 on both storefronts; .us harvest tag says 2022 — tag noise or a 2022-material "
-         "2024 pressing. Owner to confirm.", ["attribute_noise_year"]),
+         ("Title says 2024 on both storefronts; .us harvest tag says 2022 — tag noise or a "
+          "2022-material 2024 pressing. Owner to confirm."), ["attribute_noise_year"]),
         ("2012 Rice Scent Herb & Ripe Pu-erh Tea Mini Tuo", 100, 100, "match", "high",
-         "Same listing; producer tag differs by storefront ('Yunnan Sourcing USA' vs "
-         "'Yunnan Sourcing Tea Shop') — producer blocking will veto.", ["producer_tag_drift"]),
+         ("Same listing; producer tag differs by storefront ('Yunnan Sourcing USA' vs "
+          "'Yunnan Sourcing Tea Shop') — producer blocking will veto."), ["producer_tag_drift"]),
         ("Cream Soda Dan Cong Oolong Tea", 25, 25, "non_match", "low",
-         "Evergreen loose-leaf listing; storefront harvest tags disagree (2025 vs 2026) — by §8 year "
-         "is identity, so different harvest lots.", ["year_tag_drift"]),
+         ("Evergreen loose-leaf listing; storefront harvest tags disagree (2025 vs 2026) — by §8 "
+          "year is identity, so different harvest lots."), ["year_tag_drift"]),
         ("Competition Dragon Well Tea From Zhejiang * Long Jing Tea", 25, 25, "non_match", "low",
          "Storefront harvest tags disagree (2026 vs 2025) — different harvest lots by §8.", ["year_tag_drift"]),
         ("Light Roast \"Gao Cong Shui Xian\" Rock Oolong Tea", 25, 25, "non_match", "low",
@@ -785,7 +785,7 @@ def build_products() -> None:  # noqa: C901 - a long, flat list of curated specs
         wa, wb = common_weight(cl, t1, cl, t2)
         add(shop(cl, t1, wa), shop(cl, t2, wb), "non_match", "high", "hard_negative_year",
             "Recurring Crimson Lotus recipe/garden, different pressing year.", ["recurring_name"])
-    for v, cap in ((w2t, 10), (us, 8)):
+    for v, cap in ((w2t, 10), (us, 6)):
         groups: dict[str, list[str]] = defaultdict(list)
         for t, it in CAT.shop[v].items():
             if it.year is not None and YEAR_PREFIX.match(t) and is_tea(it):
@@ -793,7 +793,7 @@ def build_products() -> None:  # noqa: C901 - a long, flat list of curated specs
         cands = []
         for base, ts in groups.items():
             ts = sorted(ts)
-            for a, b in zip(ts, ts[1:]):
+            for a, b in itertools.pairwise(ts):
                 if CAT.item(v, a).year != CAT.item(v, b).year:
                     cands.append((a, b))
         n = 0
@@ -808,7 +808,7 @@ def build_products() -> None:  # noqa: C901 - a long, flat list of curated specs
     # ------------------------------------------------------------------
     # hard_negative_weight — same tea, different variant weight (§8 identity)
     # ------------------------------------------------------------------
-    for v, cap in ((w2t, 8), (us, 8), (cl, 4)):
+    for v, cap in ((w2t, 6), (us, 6), (cl, 4)):
         multi = sorted(
             (t for t, it in CAT.shop[v].items()
              if is_tea(it) and len({w for w in it.weights if w is not None}) >= 2),
@@ -1018,7 +1018,7 @@ def build_products() -> None:  # noqa: C901 - a long, flat list of curated specs
     # easy_negative — same (vendor, producer, year, weight) block, unrelated names
     # (blocking passes; only the score decides). Deterministic sha256 sampling.
     # ------------------------------------------------------------------
-    for v, cap in ((w2t, 10), (us, 10), (cl, 6), (com, 4)):
+    for v, cap in ((w2t, 8), (us, 8), (cl, 4), (com, 4)):
         blocks: dict[tuple[Any, ...], list[str]] = defaultdict(list)
         for t, it in CAT.shop[v].items():
             if not is_tea(it) or t.endswith(SEATTLE):
@@ -1121,7 +1121,6 @@ def build_producers() -> None:
         (dayi_tag2, dayi_title, "high", "'DaYi' title token on a Da Yi-tagged product."),
         (dayi_tag, slug_dayi, "high", "Steepster has a 'dayi' company page for the same factory (config slug)."),
         (slug_mtf, slug_dayi, "high", "Steepster lists Menghai Tea Factory and Dayi as separate companies; same producer."),
-        (dayi_tag, A("Dayi"), "high", "'Dayi' as written by Steepster reviewers."),
         (xg_tag, T(cl, '2019 Xiaguan "Holy Flame" Baoyan Sheng / Raw Puerh Tea', "Xiaguan"), "high",
          "Bare 'Xiaguan' title token vs the YS tag 'Xiaguan Tea Factory'."),
         (ysb, ysb2, "high", "YS house brand, two tag spellings."),
@@ -1223,8 +1222,8 @@ def build_producers() -> None:
         (clt, printify, "high", "Printify is the print-on-demand merch supplier on the CL store, not a tea producer."),
         (clt, limited, "high", "'Limited' is a stray vendor-field value, not the producer."),
         (tag_of('2000 "7562 Recipe" Aged Ripe Pu-erh Tea Brick'), tag_of('2006 Menghai Gong Ting Ripe Pu-erh Tea Cake'), "low",
-         "'Other' vs 'Other Factories' — both placeholder buckets; merging them is meaningless. Owner: "
-         "should placeholders be producer rows at all?"),
+         ("'Other' vs 'Other Factories' — both placeholder buckets; merging them is meaningless. "
+          "Owner: should placeholders be producer rows at all?")),
         (w2t_v, T(w2t, "2012 White 2 Tea / Taochaju Giant Steps", "Taochaju"), "low",
          "Taochaju is white2tea's collaboration partner on Giant Steps, not white2tea."),
     ]
@@ -1304,17 +1303,16 @@ def render(products: list[LabeledPair], producers: list[LabeledPair]) -> dict[st
     w = csv.writer(buf, lineterminator="\n")
     w.writerow(["pair_id", "entity", "category", "proposed_label", "left_name", "left_attrs",
                 "right_name", "right_attrs", "rationale", "owner_label", "owner_note"])
+    def attrs(p: LabeledPair, s: PairSide) -> str:
+        if p.entity == "producer":
+            return ""
+        return f"{s.producer} | {s.harvest_year} | {s.weight_grams}g"
+
     for p in products + producers:
         if p.label_confidence != "low":
             continue
-
-        def attrs(s: PairSide) -> str:
-            if p.entity == "producer":
-                return ""
-            return f"{s.producer} | {s.harvest_year} | {s.weight_grams}g"
-
-        w.writerow([p.pair_id, p.entity, p.category, p.label, p.left.name, attrs(p.left),
-                    p.right.name, attrs(p.right), p.rationale, "", ""])
+        w.writerow([p.pair_id, p.entity, p.category, p.label, p.left.name, attrs(p, p.left),
+                    p.right.name, attrs(p, p.right), p.rationale, "", ""])
     return {
         "product_pairs.jsonl": jsonl(products),
         "producer_pairs.jsonl": jsonl(producers),
