@@ -11,9 +11,14 @@ The product matcher follows the 4-step ladder from §8:
    ``set_limit(0.85)`` so the GIN trigram index actually fires (a
    ``similarity()`` predicate would not).
 2.5 **Attribute guard** (ROADMAP H.2; :mod:`attributes`): each trigram
-   candidate whose parsed recipe code or sheng/shou conflicts with the
-   query (mismatch, or one-sided per ``ONE_SIDED_POLICY``) is vetoed. If
-   every candidate is vetoed → create (``VETO_CREATED``).
+   candidate whose parsed recipe code, item number (``No.15`` / ``Part 2``
+   / ``BP-12``) or sheng/shou conflicts with the query (mismatch, or
+   one-sided per ``ONE_SIDED_POLICY``) is vetoed. When both rows have a
+   NULL ``harvest_year`` (SQL-blocked equal), the guard compares the
+   vintage year parsed from anywhere in the name instead
+   (``"Spring 2017 X"`` vs ``"Spring 2018 X"``) — matching-time only, the
+   stored column is untouched. If every candidate is vetoed → create
+   (``VETO_CREATED``).
 3. **Ambiguous** (≥2 candidates within 0.10 of each other) → V1 stub:
    we don't have an LLM tiebreaker yet (ml-engineer V1.5), so we log
    the ambiguity, bump a counter, and **fall through to step 4**.
@@ -422,9 +427,11 @@ class CanonicalMatcher:
         ).all()
 
         # Step 2.5: attribute guard (spec §12 hybrid step 2). Any parsed-and-
-        # conflicting recipe code / sheng-shou (or year / weight — already
-        # SQL-blocked here, but the guard is shared with the hybrid path)
-        # vetoes the candidate before ambiguity / reuse is considered.
+        # conflicting recipe code / item number / sheng-shou vetoes the
+        # candidate before ambiguity / reuse is considered. Year / weight are
+        # already SQL-blocked here (the guard is shared with the hybrid path),
+        # EXCEPT when both harvest_years are NULL: ``from_name`` then falls
+        # back to the name-parsed vintage year, which can still conflict.
         vetoes: list[GuardVeto] = []
         if sim_rows:
             query_attrs = GuardAttributes.from_name(

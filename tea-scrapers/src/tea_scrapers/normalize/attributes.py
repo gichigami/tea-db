@@ -8,8 +8,10 @@ Two concerns live here:
 1. **Name attributes** — :func:`parse_name_attributes` pulls the tokens that
    distinguish otherwise near-identical tea product names and that both
    trigram and dense embeddings collapse: vintage year, weight, Menghai /
-   CNNP-style recipe codes (``7542``, ``7262``, ``"1815 Recipe"``), and
-   sheng vs shou (raw / 生 vs ripe / 熟).
+   CNNP-style recipe codes (``7542``, ``7262``, ``"1815 Recipe"``), item
+   numbers (``No.15`` / ``#03`` / ``Part 2`` / ``Pt.1`` / ``Grade 3`` and
+   model codes ``BP-12`` / ``ZH03`` / ``V93``), and sheng vs shou
+   (raw / 生 vs ripe / 熟).
 
 2. **The attribute guard** — :func:`check_attribute_guard` compares two
    :class:`GuardAttributes` and vetoes a candidate pair on any conflict.
@@ -21,11 +23,18 @@ Source-of-truth note for year / weight: the matcher's ``harvest_year`` and
 ``weight_grams`` come from :mod:`shopify_mapper` (YS tags / start-of-title
 year; ``variant.option1`` weight, never ``variant.grams``). The guard
 compares *those* values (``GuardAttributes.harvest_year`` /
-``.weight_grams``), not the name-parsed ones. The name-parsed
-``NameAttributes.vintage_year`` / ``.weight_grams`` are informational and
-exist mainly so recipe-code detection can tell ``7542`` apart from
-``2007`` and ``357g``. Weight text parsing delegates to the mapper's parser
-so there is a single weight grammar.
+``.weight_grams``) whenever the mapper produced one. **Year fallback
+(H.2 follow-up, H.1 evidence):** when the mapper's ``harvest_year`` is
+``None`` — it only reads a year at the very start of the title — the guard
+falls back to the name-parsed ``NameAttributes.vintage_year`` (first
+standalone 4-digit token in [1900, 2099] that is not a recipe code or a
+quantity), so ``"Spring 2017 X"`` vs ``"Spring 2018 X"`` and
+``"Elemental Puerh - 2019 X"`` vs ``"... - 2020 X"`` veto. This is a
+matching-time guard only; the stored ``product.harvest_year`` column keeps
+the mapper's semantics. The name-parsed weight stays informational (it
+exists so recipe-code detection can tell ``7542`` apart from ``357g``);
+weight text parsing delegates to the mapper's parser so there is a single
+weight grammar.
 
 3. **Matching key** — :func:`strip_inventory_suffix` / :func:`matching_key`
    drop location / inventory suffixes such as ``" :: Seattle Inventory"``
@@ -111,6 +120,8 @@ class NameAttributes:
     weight_grams: int | None
     recipe_codes: frozenset[str]
     style: TeaStyle | None
+    # Normalized item-number tokens, e.g. {"no:15"}, {"part:2"}, {"model:BP12"}.
+    item_numbers: frozenset[str] = frozenset()
 
 
 # Plausible vintage years. Tea vintages before 1900 are not a thing in the
@@ -158,8 +169,46 @@ _STYLE_FALSE_POSITIVE_RE = re.compile(
 )
 
 
+# Item numbers: short (1–3 digit) sequence / grade numbers behind an explicit
+# marker, and uppercase alphanumeric model codes. Both distinguish otherwise
+# identical listings that trigram scores ≥0.85 (H.1 hard negatives:
+# "No.15 Rougui" / "No.2 Rougui", "Teacup #03" / "#04", "Sampler ... Part 1"
+# / "Part 2", "Story Telling Pt.1" / "Pt.2", "Tea Cup - Grade 2" / "Grade 3",
+# "Bonston BP-12" / "BP-13", "Lotus ZH03" / "ZH95", "Teacup V2" / "V3").
+# Only marker forms evidenced in the cassettes (survey 2026-11-01) are
+# handled. 4-digit numbers are deliberately excluded: those are years /
+# recipe codes and are classified by :func:`_parse_years_and_codes`
+# ("Dayi #7542" stays a recipe code). Units are never preceded by these
+# markers, so "#16 80ml" yields only "no:16".
+_SEQ_NUMBER_RE = re.compile(
+    r"(?:\b(?P<part>part|pt)\b\.?|\b(?P<grade>grade)\b|(?P<no>#|\bno\b\.?))"
+    r"\s*(?P<num>\d{1,3})(?![\d.,]?\d)",
+    re.IGNORECASE,
+)
+# Case-SENSITIVE: 1–4 uppercase letters, optional hyphen, 1–3 digits, optional
+# trailing letter ("BP-12", "MC09", "D-27", "KA39", "V93"). Lowercase forms
+# ("pt1", "no5") are not model codes; 4+ digit tails are years / recipe codes.
+_MODEL_CODE_RE = re.compile(r"\b(?P<letters>[A-Z]{1,4})-?(?P<digits>\d{1,3})(?P<tail>[A-Z]?)\b")
+
+
 def _nfc(s: str) -> str:
     return unicodedata.normalize("NFC", s)
+
+
+def _parse_item_numbers(name: str) -> frozenset[str]:
+    """Item-number tokens, normalized so formatting variants compare equal.
+
+    ``"#03"`` / ``"No.3"`` / ``"no 3"`` → ``"no:3"``; ``"Part 2"`` /
+    ``"Pt.2"`` → ``"part:2"``; ``"Grade 3"`` → ``"grade:3"``; ``"MC-11"`` /
+    ``"MC11"`` → ``"model:MC11"``.
+    """
+    out: set[str] = set()
+    for m in _SEQ_NUMBER_RE.finditer(name):
+        kind = "part" if m.group("part") else "grade" if m.group("grade") else "no"
+        out.add(f"{kind}:{int(m.group('num'))}")
+    for m in _MODEL_CODE_RE.finditer(name):
+        out.add(f"model:{m.group('letters')}{m.group('digits')}{m.group('tail')}")
+    return frozenset(out)
 
 
 def _parse_style(name: str) -> TeaStyle | None:
@@ -224,6 +273,7 @@ def parse_name_attributes(name: str | None) -> NameAttributes:
         weight_grams=parse_weight_text(text),
         recipe_codes=codes,
         style=_parse_style(text),
+        item_numbers=_parse_item_numbers(text),
     )
 
 
@@ -249,6 +299,9 @@ ONE_SIDED_POLICY: dict[str, OneSidedPolicy] = {
     "weight_grams": OneSidedPolicy.VETO,
     "recipe_code": OneSidedPolicy.VETO,
     "style": OneSidedPolicy.VETO,
+    # H.2 follow-up. VETO like the rest; H.1 labeled set: 0 positive pairs
+    # carry an item number on one side only.
+    "item_number": OneSidedPolicy.VETO,
 }
 
 
@@ -260,18 +313,25 @@ class GuardAttributes:
     weight_grams: int | None
     recipe_codes: frozenset[str]
     style: TeaStyle | None
+    item_numbers: frozenset[str] = frozenset()
 
     @classmethod
     def from_name(
         cls, name: str | None, *, harvest_year: int | None, weight_grams: int | None
     ) -> GuardAttributes:
-        """Recipe code + style from the name; year + weight from the mapper/row."""
+        """Recipe code, item numbers + style from the name; weight from the mapper/row.
+
+        Year: the mapper/row ``harvest_year`` when known, else the
+        name-parsed vintage year (matching-time fallback only; see module
+        docstring). A mapper year always wins over the name.
+        """
         parsed = parse_name_attributes(name)
         return cls(
-            harvest_year=harvest_year,
+            harvest_year=harvest_year if harvest_year is not None else parsed.vintage_year,
             weight_grams=weight_grams,
             recipe_codes=parsed.recipe_codes,
             style=parsed.style,
+            item_numbers=parsed.item_numbers,
         )
 
 
@@ -336,6 +396,7 @@ def check_attribute_guard(
             _compare("harvest_year", query.harvest_year, candidate.harvest_year, pol),
             _compare("weight_grams", query.weight_grams, candidate.weight_grams, pol),
             _compare("recipe_code", query.recipe_codes, candidate.recipe_codes, pol),
+            _compare("item_number", query.item_numbers, candidate.item_numbers, pol),
             _compare("style", query.style, candidate.style, pol),
         )
         if c is not None

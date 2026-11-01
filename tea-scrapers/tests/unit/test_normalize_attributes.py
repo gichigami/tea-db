@@ -362,7 +362,8 @@ def test_guard_mixed_never_matches_single_style() -> None:
         _g('"Simple Sheng" and "Simple Shou" Combo Pack', year=None, weight=None),
         _g('2017 "Simple Sheng" Sheng / Raw Puerh', year=None, weight=None),
     )
-    assert [c.reason for c in v.conflicts] == ["style:mismatch"]
+    # (The name-year fallback also flags 2017 vs no-year as one-sided.)
+    assert "style:mismatch" in [c.reason for c in v.conflicts]
 
 
 def test_guard_year_and_weight_compared_from_fields_not_name() -> None:
@@ -375,7 +376,13 @@ def test_guard_year_and_weight_compared_from_fields_not_name() -> None:
 
 
 def test_default_one_sided_policy_is_veto_for_every_attribute() -> None:
-    assert set(ONE_SIDED_POLICY) == {"harvest_year", "weight_grams", "recipe_code", "style"}
+    assert set(ONE_SIDED_POLICY) == {
+        "harvest_year",
+        "weight_grams",
+        "recipe_code",
+        "item_number",
+        "style",
+    }
     assert all(p is OneSidedPolicy.VETO for p in ONE_SIDED_POLICY.values())
 
 
@@ -414,3 +421,156 @@ def test_one_sided_year_weight_veto_mirrors_v1_is_not_distinct_from() -> None:
     a = GuardAttributes.from_name("Foo", harvest_year=2024, weight_grams=None)
     b = GuardAttributes.from_name("Foo", harvest_year=None, weight_grams=None)
     assert [x.reason for x in check_attribute_guard(a, b).conflicts] == ["harvest_year:one_sided"]
+
+
+# ---------------------------------------------------------------------------
+# H.2 follow-up (H.1 evidence): name-year fallback + item numbers
+# ---------------------------------------------------------------------------
+
+# Real H.1 hard negatives (product_pairs.jsonl) the mapper leaves at
+# harvest_year=None on both sides because the year is not at title start.
+_YEAR_NOT_AT_START_PAIRS = [
+    (  # prod-0204
+        'Spring 2017 "Slumbering Dragon" Sheng / Raw Puerh from Crimson Lotus Tea',
+        'Spring 2018 "Slumbering Dragon" Sheng / Raw Puerh from Crimson Lotus Tea',
+    ),
+    (  # prod-0207 (suffix on one side)
+        'Spring 2016 "Jingmai LOVE" Sheng / Raw Puerh from Crimson Lotus Tea :: Seattle Inventory',
+        'Spring 2018 "Jingmai LOVE" Sheng / Raw Puerh from Crimson Lotus Tea',
+    ),
+    (  # prod-0208
+        "Elemental Puerh - 2019 Bulang Sheng Puerh Tea Dragon Balls",
+        "Elemental Puerh - 2020 Bulang Sheng Puerh Tea Dragon Balls",
+    ),
+    (  # prod-0211
+        "Puerhiodic Table of the Elements 2019 - 6x Sheng Puerh Tea Dragon Balls",
+        "Puerhiodic Table of the Elements 2020 - 6x Sheng Puerh Tea Dragon Balls",
+    ),
+    (  # prod-0212
+        "Yunnan Sourcing Brand Ripe Pu-erh Tea Sampler for 2023 - Part 1",
+        "Yunnan Sourcing Brand Ripe Pu-erh Tea Sampler for 2024 - Part 1",
+    ),
+]
+
+
+@pytest.mark.parametrize(("a", "b"), _YEAR_NOT_AT_START_PAIRS)
+def test_guard_name_year_fallback_vetoes_when_mapper_year_is_none(a: str, b: str) -> None:
+    v = check_attribute_guard(_g(a, year=None, weight=200), _g(b, year=None, weight=200))
+    assert [c.reason for c in v.conflicts] == ["harvest_year:mismatch"]
+    assert [c.reason for c in check_attribute_guard(_g(b, None, 200), _g(a, None, 200)).conflicts] == [
+        "harvest_year:mismatch"
+    ]
+
+
+def test_guard_name_year_fallback_same_year_passes() -> None:
+    # CL Seattle twin of the same pressing: both years parse to 2017.
+    base = 'Spring 2017 "Slumbering Dragon" Sheng / Raw Puerh from Crimson Lotus Tea'
+    a = _g(base, year=None, weight=200)
+    assert a.harvest_year == 2017
+    assert not check_attribute_guard(a, _g(base + " :: Seattle Inventory", None, 200)).vetoed
+
+
+def test_guard_mapper_year_wins_over_name_year() -> None:
+    # Fallback only fires on None; a mapper value is never overridden.
+    assert _g("Elemental Puerh - 2019 Bulang", year=2024).harvest_year == 2024
+    assert _g("Elemental Puerh - 2019 Bulang", year=None).harvest_year == 2019
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        'Three Cranes "1815 Recipe" Liu Bao Tea Brick',  # recipe marker, < 1900 anyway
+        "Menghai Dayi #7542 Raw Pu-erh Tea Cake",  # recipe code outside year window
+        "Liu Bao 2101 Recipe Tea Basket",  # 2101 > 2099 → recipe code
+        "Lao Cha Tou Ripe Pu-erh Tea Brick 1000g",  # quantity
+        "Jingmai Old Arbor Black Tea - 1800m",  # elevation
+        "Teapot 1200ml Jian Shui Clay",  # volume
+    ],
+)
+def test_name_year_fallback_ignores_recipe_codes_and_quantities(name: str) -> None:
+    assert _g(name, year=None).harvest_year is None
+
+
+def test_mapper_harvest_year_semantics_unchanged() -> None:
+    """The fallback is guard-only: the mapper still anchors at title start."""
+    from tea_scrapers.normalize.shopify_mapper import _parse_harvest_year
+    from tea_scrapers.normalize.tags import parse_tags
+
+    assert _parse_harvest_year(_YEAR_NOT_AT_START_PAIRS[0][0], parse_tags([])) is None
+
+
+@pytest.mark.parametrize(
+    ("name", "items"),
+    [
+        ("No.15 Rougui", {"no:15"}),
+        ('Huaning "Super Glaze" Teacup #03 - 70ml', {"no:3"}),
+        ('Vintage Wood Fired Jianzhan Teacup #16 80ml "Oil Drop"', {"no:16"}),
+        ("Yunnan Sourcing Brand Ripe Pu-erh Tea Sampler for 2023 - Part 1", {"part:1"}),
+        ("2017 The Treachery of Story Telling Pt.2", {"part:2"}),
+        ("Yunnan Dragon Kiln Wood Fired Tea Cup - Grade 3", {"grade:3"}),
+        ("Bonston BP-12 Automatic Tea Brewer", {"model:BP12"}),
+        ('SAMA "MC-11" Insulated Thermos with Cup', {"model:MC11"}),
+        ('Jian Shui Clay "Lotus ZH03" Teapot by Su Mo', {"model:ZH03"}),
+        ("2022 Menghai DaYi V93 Premium Ripe Pu-erh Tea Tuo", {"model:V93"}),
+        ("Road 2 Nowhere Teacup V10", {"model:V10"}),
+        # None: 4-digit recipe codes / years, units, bare numbers, plain words.
+        ("Menghai Dayi #7542 Raw Pu-erh Tea Cake", set()),
+        ('2019 Spring "Space Girls - Cosima" 100g Cake - Sheng / Raw Puerh Tea', set()),
+        ("Puerhiodic Table of the Elements 2019 - 6x Sheng Puerh Tea Dragon Balls", set()),
+        ('Jian Shui Clay "Jiao Ni 66" Teapot by Wang Yan Ping', set()),
+        ("Dahongpao", set()),
+    ],
+)
+def test_parse_item_numbers(name: str, items: set[str]) -> None:
+    assert parse_name_attributes(name).item_numbers == frozenset(items)
+
+
+def test_item_number_formatting_variants_compare_equal() -> None:
+    assert parse_name_attributes("Teacup #03").item_numbers == parse_name_attributes(
+        "Teacup No. 3"
+    ).item_numbers
+    assert parse_name_attributes("Sampler Pt.2").item_numbers == parse_name_attributes(
+        "Sampler - Part 2"
+    ).item_numbers
+    assert parse_name_attributes("SAMA MC-11").item_numbers == parse_name_attributes(
+        "SAMA MC11"
+    ).item_numbers
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("No.15 Rougui", "No.2 Rougui"),  # prod-0171
+        ("2017 The Treachery of Story Telling Pt.1", "2017 The Treachery of Story Telling Pt.2"),
+        ("Bonston BP-12 Automatic Tea Brewer", "Bonston BP-13 Automatic Tea Brewer"),
+        ('Huaning "Super Glaze" Teacup #03 - 70ml', 'Huaning "Super Glaze" Teacup #04 - 70ml'),
+        (
+            "Yunnan Dragon Kiln Wood Fired Tea Cup - Grade 2",
+            "Yunnan Dragon Kiln Wood Fired Tea Cup - Grade 3",
+        ),
+        (
+            "Yunnan Sourcing Brand Ripe Pu-erh Tea Sampler for 2024 - Part 2",
+            "Yunnan Sourcing Brand Ripe Pu-erh Tea Sampler for 2024 - Part 3",
+        ),
+    ],
+)
+def test_guard_item_number_mismatch_vetoes_real_pairs(a: str, b: str) -> None:
+    v = check_attribute_guard(_g(a, None, None), _g(b, None, None))
+    assert [c.reason for c in v.conflicts] == ["item_number:mismatch"]
+
+
+def test_guard_item_number_one_sided_vetoes_by_default() -> None:
+    # prod-0297: model-coded teapot vs the base model.
+    v = check_attribute_guard(
+        _g('Jian Shui Clay "She De KA39" Teapot by Kong Ye', None, None),
+        _g('Jian Shui Clay "She De" Teapot by Kong Ye', None, None),
+    )
+    assert [c.reason for c in v.conflicts] == ["item_number:one_sided"]
+
+
+def test_guard_same_item_number_passes() -> None:
+    v = check_attribute_guard(
+        _g("2022 Menghai DaYi V93 Premium Ripe Pu-erh Tea Tuo", 2022, None),
+        _g("2022 Menghai DaYi V93 Premium Ripe Puerh Tea Tuo", 2022, None),
+    )
+    assert not v.vetoed

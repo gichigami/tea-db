@@ -818,3 +818,146 @@ def test_guard_vetoes_surface_in_normalize_stats(session: Session) -> None:
     assert stats.guard_vetoes == 1
     assert stats.guard_vetoes_by_reason == {"style:mismatch": 1}
     assert stats.by_source[source]["guard_vetoes"] == 1
+
+
+# ---------------------------------------------------------------------------
+# H.2 follow-up (H.1 evidence): name-year fallback + item-number guard
+# ---------------------------------------------------------------------------
+
+
+def test_guard_name_year_fallback_vetoes_when_both_years_null(session: Session) -> None:
+    """Real CL pair (H.1 prod-0204): the year is not at title start, so the
+    mapper stores harvest_year=NULL on both and the SQL year block passes.
+    Trigram ≈0.94 merged them pre-fix; the name-year fallback must veto."""
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    pid = _seed_producer(session)
+    seed = _seed_product(
+        session,
+        f'Spring 2017 "Slumbering Dragon {tok}" Sheng / Raw Puerh from Crimson Lotus Tea',
+        producer_id=pid,
+        year=None,
+        weight=200,
+    )
+    query = f'Spring 2018 "Slumbering Dragon {tok}" Sheng / Raw Puerh from Crimson Lotus Tea'
+    assert _sim(session, seed.canonical_name, query) >= TRIGRAM_THRESHOLD
+
+    result = matcher.match_or_create_product(
+        _make_fields(query, harvest_year=None, weight_grams=200),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert result.decision == ProductDecision.VETO_CREATED
+    assert [(v.candidate_product_id, v.reasons) for v in result.guard_vetoes] == [
+        (seed.product_id, ("harvest_year:mismatch",))
+    ]
+    # Matching-time guard only: the stored column keeps the mapper's NULL.
+    assert session.get(Product, result.product_id).harvest_year is None
+
+
+def test_guard_name_year_fallback_same_year_still_reuses(session: Session) -> None:
+    """Control: same mid-title year, spelling-only difference → trigram reuse."""
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    pid = _seed_producer(session)
+    seed = _seed_product(
+        session,
+        f'Spring 2017 "Slumbering Dragon {tok}" Sheng / Raw Puerh from Crimson Lotus Tea',
+        producer_id=pid,
+        year=None,
+        weight=200,
+    )
+    query = f'Spring 2017 "Slumbering Dragon {tok}" Sheng / Raw Pu-erh from Crimson Lotus Tea'
+    assert _sim(session, seed.canonical_name, query) >= TRIGRAM_THRESHOLD
+
+    result = matcher.match_or_create_product(
+        _make_fields(query, harvest_year=None, weight_grams=200),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert result.decision == ProductDecision.TRIGRAM
+    assert result.product_id == seed.product_id
+    assert result.guard_vetoes == ()
+
+
+def test_guard_item_number_mismatch_vetoes_sampler_parts(session: Session) -> None:
+    """Real YS pair (H.1 prod-0189): "... Sampler for 2023 - Part 1" vs "Part 2"."""
+    matcher = CanonicalMatcher()
+    tok = _digits()
+    pid = _seed_producer(session)
+    seed = _seed_product(
+        session,
+        f"Yunnan Sourcing Brand Ripe Pu-erh Tea Sampler {tok} for 2023 - Part 1",
+        producer_id=pid,
+        year=None,
+        weight=None,
+    )
+    query = f"Yunnan Sourcing Brand Ripe Pu-erh Tea Sampler {tok} for 2023 - Part 2"
+    assert _sim(session, seed.canonical_name, query) >= TRIGRAM_THRESHOLD
+
+    result = matcher.match_or_create_product(
+        _make_fields(query, harvest_year=None, weight_grams=None),
+        producer_id=pid,
+        region_id=None,
+        session=session,
+    )
+    assert result.decision == ProductDecision.VETO_CREATED
+    assert result.guard_vetoes[0].reasons == ("item_number:mismatch",)
+
+
+def test_name_year_fallback_end_to_end_through_mapper(session: Session) -> None:
+    """Bronze → mapper → matcher with real CL-shaped payloads: the mapper
+    leaves harvest_year NULL (title starts with "Spring"), the guard vetoes,
+    and both silver rows keep harvest_year NULL."""
+    import contextlib
+    import datetime as dt
+
+    from tea_scrapers.normalize.silver import NormalizeStats, SilverNormalizer
+    from tea_scrapers.storage.models import RawProductSnapshot
+
+    tok = _digits()
+    source = f"year_fallback_{tok}"
+    normalizer = SilverNormalizer(
+        since=dt.date(2026, 1, 1),
+        tracker=_NullTracker(),  # type: ignore[arg-type]
+        run_id="test",
+        session_factory=lambda: contextlib.nullcontext(session),
+        vendor_configs={},
+    )
+
+    def _row(pid: int, year: int) -> RawProductSnapshot:
+        return RawProductSnapshot(
+            source=source,
+            external_id=str(pid),
+            scraped_at=dt.datetime(2026, 5, 16, tzinfo=dt.UTC),
+            run_id="test",
+            payload_hash=f"h{pid}",
+            payload={
+                "id": pid,
+                "title": (
+                    f'Spring {year} "Slumbering Dragon {tok}" Sheng / Raw Puerh '
+                    "from Crimson Lotus Tea"
+                ),
+                "vendor": f"Year Fallback Producer {tok}",
+                "product_type": "Puerh Tea",
+                "tags": [],
+                "variants": [
+                    {"id": pid * 10, "option1": "200g", "available": True, "price": "50.00"}
+                ],
+            },
+        )
+
+    stats = NormalizeStats()
+    normalizer._process_bronze_row(_row(1, 2017), stats, session)
+    normalizer._process_bronze_row(_row(2, 2018), stats, session)
+
+    assert stats.by_decision[ProductDecision.CREATED.value] == 1
+    assert stats.by_decision[ProductDecision.VETO_CREATED.value] == 1
+    assert stats.guard_vetoes_by_reason == {"harvest_year:mismatch": 1}
+    years = session.execute(
+        text("SELECT harvest_year FROM product WHERE canonical_name LIKE :p"),
+        {"p": f"%Slumbering Dragon {tok}%"},
+    ).scalars().all()
+    assert years == [None, None]
