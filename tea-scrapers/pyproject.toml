@@ -37,6 +37,17 @@ dev = [
     "pytest-httpx>=0.30",
     "vcrpy>=6.0",
 ]
+# BGE-M3 name embeddings for the hybrid canonical matcher (ROADMAP H.3; spec
+# §12 "Hybrid canonical matcher" — dependency justification there). OPTIONAL:
+# the base install, CI and pytest never need it (tests use committed fixture
+# vectors). Install CPU-only torch wheels (~1.2 GB installed vs ~5 GB CUDA):
+#   pip install -e '.[embed]' --extra-index-url https://download.pytorch.org/whl/cpu
+# torch>=2.6 so transformers loads BGE-M3's pytorch_model.bin with weights_only.
+embed = [
+    "torch>=2.6",
+    "transformers>=4.44,<5",
+    "huggingface-hub>=0.23,<1.0",
+]
 
 [project.scripts]
 tea-scrape = "tea_scrapers.cli:cli"

@@ -35,8 +35,8 @@ from tea_scrapers.embed.base import (
     text_hash,
 )
 from tea_scrapers.embed.cache import (
-    CacheEntry,
     CachedEmbedder,
+    CacheEntry,
     EmbeddingStore,
     FileEmbeddingStore,
     InMemoryEmbeddingStore,

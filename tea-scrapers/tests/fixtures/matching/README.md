@@ -16,6 +16,7 @@ hybrid matcher in H.5 (scrapers spec §12 "Hybrid canonical matcher").
 | `product_pairs.jsonl` | 402 product pairs (155 match / 247 non_match) |
 | `producer_pairs.jsonl` | 115 producer pairs (51 match / 64 non_match) |
 | `low_confidence_review.csv` | The 39 `label_confidence = low` pairs (30 product + 9 producer), flattened for a spreadsheet, with blank `owner_label` / `owner_note` columns |
+| `name_embeddings_bge_m3.jsonl.gz` | BGE-M3 (`BAAI/bge-m3` @ `5617a9f6…`) dense float16 + sparse vectors for every pair text (672 matching keys / producer norms, 1.44 MB). Built by `scripts/build_name_embedding_fixtures.py` (needs the `[embed]` extra; `--check` does not). Read cache-only by `tea_scrapers.embed.fixture_embedder`, so the embedding harness (`python -m tea_scrapers.eval.embedding_eval`) runs offline. Regenerate after any label or `matching_key` change — `test_fixture_covers_every_pair_text` fails until you do |
 | `owner_review.csv` | *(absent until review)* Owner decisions; the generator applies them |
 
 Generator: `tea-scrapers/scripts/build_matcher_pairs.py`. Schema: `tea_scrapers.eval.pairs`.

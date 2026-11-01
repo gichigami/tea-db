@@ -32,7 +32,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from tea_scrapers.embed.base import Embedding, EmbedderUnavailable, normalize_embed_text
+from tea_scrapers.embed.base import EmbedderUnavailable, Embedding, normalize_embed_text
 
 BGE_M3_MODEL = "BAAI/bge-m3"
 # huggingface.co/api/models/BAAI/bge-m3 "sha" (lastModified 2024-07-03), pinned 2026-11-01.

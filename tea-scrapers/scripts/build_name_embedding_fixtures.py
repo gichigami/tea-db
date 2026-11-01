@@ -37,10 +37,14 @@ from tea_scrapers.eval.embedding_eval import collect_pair_texts
 # BGE-M3 model card (huggingface.co/BAAI/bge-m3), computed there in fp16.
 _PARITY_Q = ["What is BGE M3?", "Defination of BM25"]
 _PARITY_P = [
-    "BGE M3 is an embedding model supporting dense retrieval, lexical matching and "
-    "multi-vector interaction.",
-    "BM25 is a bag-of-words retrieval function that ranks a set of documents based on the "
-    "query terms appearing in each document",
+    (
+        "BGE M3 is an embedding model supporting dense retrieval, lexical matching and "
+        "multi-vector interaction."
+    ),
+    (
+        "BM25 is a bag-of-words retrieval function that ranks a set of documents based on the "
+        "query terms appearing in each document"
+    ),
 ]
 _PARITY_DENSE = [[0.6265, 0.3477], [0.3499, 0.678]]
 _PARITY_LEXICAL = 0.19554901123046875
@@ -59,7 +63,7 @@ def _check(path: Path) -> int:
     return 1 if missing else 0
 
 
-def _parity(embedder) -> int:  # noqa: ANN001 - BgeM3Embedder, imported lazily
+def _parity(embedder) -> int:
     q = embedder.embed(_PARITY_Q, with_sparse=True)
     p = embedder.embed(_PARITY_P, with_sparse=True)
     ok = True

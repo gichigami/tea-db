@@ -72,9 +72,12 @@ from tea_scrapers.eval.matcher_eval import (
 )
 from tea_scrapers.eval.pairs import LabeledPair, load_pairs
 
-# Embedding cosines bunch high on short names, so sweep finer and wider than H.1.
-FINE_THRESHOLDS: tuple[float, ...] = tuple(round(0.30 + 0.01 * i, 2) for i in range(70))
+# Dense cosines of unrelated short names sit around 0.3-0.6 and matched ones
+# bunch above 0.9, so sweep the full [0, 1) range at 0.01 (H.1 used 0.50-0.95).
+FINE_THRESHOLDS: tuple[float, ...] = tuple(round(0.01 * i, 2) for i in range(100))
 TARGET_KEY = f"max_recall_with_precision_ge_{PRECISION_TARGET}"
+SECONDARY_PRECISION = 0.90
+SECONDARY_KEY = f"max_recall_with_precision_ge_{SECONDARY_PRECISION}"
 
 Kind = Literal["dense", "sparse"]
 
@@ -179,12 +182,37 @@ def _best(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
         v = row.get(k)
         return float(v) if isinstance(v, (int, float)) else -1.0
 
+    def at(target: float) -> dict[str, object] | None:
+        # Highest recall among thresholds meeting the target (precision is not
+        # monotone in t on ~500 pairs, so "lowest t" can undershoot).
+        meeting = [r for r in rows if f(r, "precision") >= target]
+        if not meeting:
+            return None
+        return dict(max(meeting, key=lambda r: (f(r, "recall"), -f(r, "threshold"))))
+
     best = max(rows, key=lambda r: (f(r, "f1"), f(r, "threshold")))
-    meeting = [r for r in rows if f(r, "precision") >= PRECISION_TARGET]
-    # Highest recall among thresholds meeting the target (precision is not
-    # monotone in t on 500 pairs; "lowest t" and "max recall" coincide when it is).
-    at_target = max(meeting, key=lambda r: (f(r, "recall"), -f(r, "threshold"))) if meeting else None
-    return {"best_f1": dict(best), TARGET_KEY: None if at_target is None else dict(at_target)}
+    return {"best_f1": dict(best), TARGET_KEY: at(PRECISION_TARGET),
+            SECONDARY_KEY: at(SECONDARY_PRECISION)}
+
+
+def roc_auc(gold: Sequence[bool], scores: Sequence[float]) -> float | None:
+    """Mann-Whitney ROC-AUC (ties count 1/2). Threshold-free separability."""
+    pos = [s for g, s in zip(gold, scores, strict=True) if g]
+    neg = [s for g, s in zip(gold, scores, strict=True) if not g]
+    if not pos or not neg:
+        return None
+    ranked = sorted((s, i) for i, s in enumerate([*pos, *neg]))
+    ranks = [0.0] * len(ranked)
+    i = 0
+    while i < len(ranked):
+        j = i
+        while j + 1 < len(ranked) and ranked[j + 1][0] == ranked[i][0]:
+            j += 1
+        for k in range(i, j + 1):
+            ranks[ranked[k][1]] = (i + j) / 2 + 1
+        i = j + 1
+    r_pos = sum(ranks[: len(pos)])
+    return (r_pos - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
 
 
 def _cat_summary(by_cat: Mapping[str, Counts]) -> dict[str, dict[str, object]]:
@@ -208,6 +236,10 @@ def compare_scorers(
         scores = score_pairs(pairs, scorer, policy.prepare)
         rows = sweep(pairs, scores, policy, thresholds, entity=entity, scorer_name=scorer.name)
         best = _best(rows)
+        # AUC over the pairs whose fate the score decides (not vetoed, not exact).
+        decided = [(p.label == "match", sc) for p, sc in zip(pairs, scores, strict=True)
+                   if policy.gate(p) is None and not policy.exact(p)]
+        auc = roc_auc([g for g, _ in decided], [sc for _, sc in decided])
         cats: dict[str, object] = {}
         for label, row in best.items():
             if row is None:
@@ -216,7 +248,11 @@ def compare_scorers(
             rep = evaluate(pairs, scores, policy, float(row["threshold"]),
                            entity=entity, scorer_name=scorer.name)
             cats[label] = _cat_summary(rep.by_category)
-        per[scorer.name] = {"sweep": rows, "best": best, "by_category_at": cats}
+        per[scorer.name] = {
+            "sweep": rows, "best": best, "by_category_at": cats,
+            "auc_score_decided": None if auc is None else round(auc, 4),
+            "n_score_decided": len(decided),
+        }
     out["scorers"] = per
     return out
 
@@ -279,37 +315,46 @@ FOCUS_CATEGORIES = (
 
 
 def render_comparison(result: Mapping[str, object]) -> str:
-    lines = [f"# {result['status']}", f"# embedder={result['embedder']} "
-             f"confidence={result['confidence_filter']}", ""]
+    lines = [
+        f"# {result['status']}",
+        f"# embedder={result['embedder']} confidence={result['confidence_filter']}",
+        "",
+    ]
     views = result["views"]
     assert isinstance(views, list)
     for view in views:
         lines.append(f"== {view['entity']} / {view['policy']} (n={view['n']}) ==")
-        lines.append(f"{'scorer':34s} {'bestF1 t':>8s} {'P':>6s} {'R':>6s} {'F1':>6s} | "
-                     f"{'P>=0.98 t':>9s} {'R':>6s}")
+        lines.append(f"{'scorer':30s} {'AUC':>6s} | {'bestF1 t':>8s} {'P':>6s} {'R':>6s} "
+                     f"{'F1':>6s} | {'P>=.98 t':>8s} {'R':>6s} | {'P>=.90 t':>8s} {'R':>6s}")
         per = view["scorers"]
         for name, blk in per.items():
             b = blk["best"]["best_f1"]
-            tgt = blk["best"][TARGET_KEY]
+            cells = []
+            for key in (TARGET_KEY, SECONDARY_KEY):
+                tgt = blk["best"][key]
+                cells.append(f"{'none':>8s} {'-':>6s}" if tgt is None
+                             else f"{tgt['threshold']:>8.2f} {_f(tgt['recall']):>6s}")
             lines.append(
-                f"{name:34s} {b['threshold']:>8.2f} {_f(b['precision']):>6s} "
-                f"{_f(b['recall']):>6s} {_f(b['f1']):>6s} | "
-                + (f"{'none':>9s} {'-':>6s}" if tgt is None
-                   else f"{tgt['threshold']:>9.2f} {_f(tgt['recall']):>6s}")
+                f"{name[:30]:30s} {_f(blk['auc_score_decided']):>6s} | {b['threshold']:>8.2f} "
+                f"{_f(b['precision']):>6s} {_f(b['recall']):>6s} {_f(b['f1']):>6s} | "
+                + " | ".join(cells)
             )
-        lines.append("per-category at best-F1 t (positives: TP/pos; negatives: FP/n):")
+        lines.append(f"  (AUC over the {next(iter(per.values()))['n_score_decided']} pairs the "
+                     "score decides; best-F1 degenerates to t~0 when positives are ~45%)")
+        names = list(per)
         cats = sorted({c for blk in per.values() for c in blk["by_category_at"]["best_f1"]})
         cats = [c for c in FOCUS_CATEGORIES if c in cats] + [
             c for c in cats if c not in FOCUS_CATEGORIES]
-        names = list(per)
-        lines.append(f"  {'category':30s} " + " ".join(f"{n[:16]:>16s}" for n in names))
-        for c in cats:
-            cells = []
-            for n in names:
-                d = per[n]["by_category_at"]["best_f1"].get(c)
-                cells.append("-" if d is None else
-                             (f"{d['tp']}/{d['pos']}" if d["pos"] else f"FP {d['fp']}/{d['n']}"))
-            lines.append(f"  {c:30s} " + " ".join(f"{x:>16s}" for x in cells))
+        for label, title in (("best_f1", "best-F1 t"), (TARGET_KEY, "the P>=0.98 t")):
+            lines.append(f"per-category at {title} (positives: TP/pos; negatives: FP/n):")
+            lines.append(f"  {'category':30s} " + " ".join(f"{n[:16]:>16s}" for n in names))
+            for c in cats:
+                cells = []
+                for n in names:
+                    d = per[n]["by_category_at"].get(label, {}).get(c)
+                    cells.append("-" if d is None else (
+                        f"{d['tp']}/{d['pos']}" if d["pos"] else f"FP {d['fp']}/{d['n']}"))
+                lines.append(f"  {c:30s} " + " ".join(f"{x:>16s}" for x in cells))
         lines.append("")
     return "\n".join(lines)
 
