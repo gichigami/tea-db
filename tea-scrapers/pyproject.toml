@@ -45,10 +45,11 @@ dev = [
 # the base install, CI and pytest never need it (tests use committed fixture
 # vectors). Install CPU-only torch wheels (~1.2 GB installed vs ~5 GB CUDA):
 #   pip install -e '.[embed]' --extra-index-url https://download.pytorch.org/whl/cpu
-# torch>=2.6 so transformers loads BGE-M3's pytorch_model.bin with weights_only.
+# torch>=2.6 so transformers loads BGE-M3's pytorch_model.bin with weights_only;
+# transformers>=4.51 for the Qwen3 architecture (embed/qwen3.py, Option-B probe).
 embed = [
     "torch>=2.6",
-    "transformers>=4.44,<5",
+    "transformers>=4.51,<5",
     "huggingface-hub>=0.23,<1.0",
 ]
 

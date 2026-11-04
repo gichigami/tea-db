@@ -420,8 +420,8 @@ FOCUS_CATEGORIES = (
 def render_comparison(result: Mapping[str, object]) -> str:
     lines = [
         f"# {result['status']}",
-        f"# embedder={result['embedder']} confidence={result['confidence_filter']} "
-        f"augment={result.get('augment')}",
+        (f"# embedder={result['embedder']} confidence={result['confidence_filter']} "
+         f"augment={result.get('augment')}"),
         "",
     ]
     views = result["views"]

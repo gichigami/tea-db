@@ -18,6 +18,10 @@ Usage::
     python scripts/build_name_embedding_fixtures.py [--cache-dir DIR] [--rebuild]
     python scripts/build_name_embedding_fixtures.py --check     # no model needed
     python scripts/build_name_embedding_fixtures.py --parity    # model-card parity check
+    # Option-B probe model (spec §12 H.3 results; vectors NOT committed — see there):
+    python scripts/build_name_embedding_fixtures.py --model qwen3 --parity
+    python scripts/build_name_embedding_fixtures.py --model qwen3 --instruct \
+        [--dim 256] [--augment replace] --out /scratch/qwen3.jsonl.gz
 
 ``--check`` exits 1 when a pair text is missing from the fixture (labels or
 ``matching_key`` changed) and lists stale entries (texts no longer requested).
@@ -48,6 +52,19 @@ _PARITY_P = [
 ]
 _PARITY_DENSE = [[0.6265, 0.3477], [0.3499, 0.678]]
 _PARITY_LEXICAL = 0.19554901123046875
+
+# Qwen3-Embedding-0.6B model card, transformers example (fp32).
+_QWEN3_TASK = "Given a web search query, retrieve relevant passages that answer the query"
+_QWEN3_Q = ["What is the capital of China?", "Explain gravity"]
+_QWEN3_D = [
+    "The capital of China is Beijing.",
+    (
+        "Gravity is a force that attracts two bodies towards each other. It gives weight to "
+        "physical objects and is responsible for the movement of planets around the sun."
+    ),
+]
+_QWEN3_SCORES = [[0.7645568251609802, 0.14142508804798126],
+                 [0.13549736142158508, 0.5999549627304077]]
 
 
 def _check(path: Path) -> int:
@@ -81,6 +98,22 @@ def _parity(embedder) -> int:
     return 0 if ok else 1
 
 
+def _qwen3_parity(cache_dir: Path | None, local_files_only: bool) -> int:
+    from tea_scrapers.embed.qwen3 import Qwen3Embedder
+
+    kw = {"cache_dir": cache_dir, "local_files_only": local_files_only, "max_length": 8192}
+    q = Qwen3Embedder(instruction=_QWEN3_TASK, **kw).embed(_QWEN3_Q)  # type: ignore[arg-type]
+    d = Qwen3Embedder(**kw).embed(_QWEN3_D)  # type: ignore[arg-type]
+    ok = True
+    for i, eq in enumerate(q):
+        for j, ed in enumerate(d):
+            got = sum(a * b for a, b in zip(eq.dense, ed.dense, strict=True))
+            ok &= abs(got - _QWEN3_SCORES[i][j]) < 1e-4
+            print(f"score[{i}][{j}] = {got:.6f} (card {_QWEN3_SCORES[i][j]:.6f})")
+    print("parity OK" if ok else "parity FAILED")
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", type=Path, default=DEFAULT_NAME_EMBEDDING_FIXTURE)
@@ -90,20 +123,40 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--prune", action="store_true", help="drop entries no longer requested")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--parity", action="store_true")
+    ap.add_argument("--model", choices=("bge-m3", "qwen3"), default="bge-m3")
+    ap.add_argument("--instruct", action="store_true",
+                    help="qwen3: prefix NAME_MATCH_INSTRUCTION (model-card query format)")
+    ap.add_argument("--dim", type=int, default=None, help="qwen3: MRL output dim (32-1024)")
+    ap.add_argument("--augment", choices=("append", "replace"), action="append", default=[],
+                    help="also embed hanzi→pinyin variants of every text (repeatable)")
     args = ap.parse_args(argv)
 
     if args.check:
         return _check(args.out)
 
-    from tea_scrapers.embed.bge_m3 import BgeM3Embedder
+    with_sparse = args.model == "bge-m3"
+    if args.model == "qwen3":
+        if args.parity:
+            return _qwen3_parity(args.cache_dir, args.local_files_only)
+        if args.out == DEFAULT_NAME_EMBEDDING_FIXTURE:
+            ap.error("--model qwen3 needs an explicit --out (the default is the BGE-M3 fixture)")
+        from tea_scrapers.embed.qwen3 import NAME_MATCH_INSTRUCTION, QWEN3_DIM, Qwen3Embedder
 
-    model = BgeM3Embedder(cache_dir=args.cache_dir, local_files_only=args.local_files_only)
-    if args.parity:
-        model.max_length = 8192
-        return _parity(model)
+        model = Qwen3Embedder(
+            cache_dir=args.cache_dir, local_files_only=args.local_files_only,
+            dim=args.dim or QWEN3_DIM,
+            instruction=NAME_MATCH_INSTRUCTION if args.instruct else None,
+        )
+    else:
+        from tea_scrapers.embed.bge_m3 import BgeM3Embedder
+
+        model = BgeM3Embedder(cache_dir=args.cache_dir, local_files_only=args.local_files_only)
+        if args.parity:
+            model.max_length = 8192
+            return _parity(model)
 
     key = model_key(model)
-    texts = collect_pair_texts()
+    texts = collect_pair_texts(augment=(None, *args.augment))
     kept = []
     if args.prune and args.out.exists() and not args.rebuild:
         keep = {text_hash(t) for t in texts}
@@ -114,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     if kept:
         store.put_many(key, kept)
     cached = CachedEmbedder(store, model)
-    cached.embed(texts, with_sparse=True)
+    cached.embed(texts, with_sparse=with_sparse)
     wrote = store.flush()
     size = args.out.stat().st_size
     print(f"{args.out}: {len(store)} entries ({cached.misses} embedded, {cached.hits} cached), "
