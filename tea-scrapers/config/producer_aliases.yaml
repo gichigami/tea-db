@@ -1,0 +1,572 @@
+# Producer alias seed list for the canonical producer matcher.
+#
+# Consumer: the producer-alias loader (data-engineer, spec §12 "Hybrid
+# canonical matcher"). Every string in `aliases` resolves to its entry's
+# `canonical` producer. Curated by ontology-curator.
+#
+# Built from the raw strings in the committed fixtures (YS `Producer_*` tags
+# and Shopify `vendor` fields in tests/fixtures/cassettes/*_products.yaml,
+# the golden JSONL under tests/fixtures/golden/, and the gzipped Steepster
+# cassette) plus domain knowledge. It was NOT derived from the labeled
+# evaluation set tests/fixtures/matching/producer_pairs.jsonl.
+#
+# Invariants (the loader should assert all of them):
+#   1. After _producer_norm (NFC + lowercase + whitespace collapse) each alias
+#      appears exactly once in the file, and no alias equals the normalized
+#      form of another entry's `canonical`.
+#   2. An alias must name the SAME producing entity as its canonical. A brand
+#      becomes an alias only when exactly one producer owns it (Dayi ->
+#      Menghai Tea Factory, Lao Tong Zhi -> Haiwan, Three Cranes -> Wuzhou).
+#   3. A bare toponym (county, town, mountain, village, farm, city) is NEVER
+#      an alias, even when a factory is named after it. "Menghai", "Xiaguan",
+#      "Mengku", "Jinggu", "Liming", "Nanqiao", "Wuzhou", "Haiwan", "Bulang",
+#      "Lao Ban Zhang", "Yiwu", "Pasha", "Lao Man'e" and "Wu Liang" all appear
+#      in fixture titles as places, often in the same title as some other
+#      producer (e.g. `2004 Menghai Bamboo Leaf Ripe Pu-erh Tea Brick` under
+#      vendor "Other Factories"; `2005 Xinghai "Lao Ban Zhang"`;
+#      `2005 Nan Qiao "Liming Impression"`; `2009 Jinggu ...` under Producer
+#      tag "Yi Shan Tea Factory").
+#      Two flagged exceptions: "Bai Sha Xi" and "Gao Jia Shan" are Anhua place
+#      names, but YS uses each one by itself as the Producer tag, and neither
+#      is used as a tea-origin label in the fixture titles. See their notes.
+#   4. Abbreviations of two letters are excluded ("FT" for Fei Tai, "YS");
+#      three-letter abbreviations are kept only when each has one referent in
+#      the tea community (W2T, CLT).
+#
+# Deliberately NOT listed (decisions recorded here so nobody adds them back
+# without review):
+#   - "Other", "Other Factories": YS placeholder buckets that span unrelated
+#     factories. They must never be aliases. The current vendor/tag fallback
+#     creates a single producer named "Other" from them, which data-engineer
+#     should look at.
+#   - "Zhongcha" / "Zhong Cha" / "中茶" / "COFCO" / "中粮" / "China Tea":
+#     中茶 is a China Tea Co. (COFCO) trademark that several producing
+#     entities use: the CNNP Yunnan, Hunan and Guangxi branches, and before
+#     the 1990s cakes pressed by Menghai, Xiaguan and Kunming. The fixtures
+#     show the problem directly: vendor "COFCO" + Producer tag "CNNP (Hunan)"
+#     + title `2017 Zhong Cha "Ya Pan Ye Fang" ... Fu Brick of Hunan`.
+#     Aliasing any of these to one CNNP branch would merge the branches.
+#   - "Yunnan Sourcing Tea Shop", "Yunnan Sourcing USA", "Yunnan Sourcing",
+#     "Yunnan Sourcing China", "YS": these name the RETAILER, not the
+#     in-house brand. 346 YS products carry vendor "Yunnan Sourcing Tea Shop"
+#     with no Producer tag, and they are third-party teas (e.g. `Fuding Shou
+#     Mei White Tea in King Orange`).
+#   - "Printify", "Limited" (Crimson Lotus vendor fields): merch fulfilment
+#     and noise, not producers.
+#   - Teaware artisans and accessory brands (Jin Jia Qi, Su Mo, Samadoyo,
+#     Bonston, ...): out of scope for tea-producer canonicalization, and they
+#     have no alias variants worth seeding.
+#   - "Mengku Rongshi" / "勐库戎氏": almost certainly the post-2000 owner of
+#     Shuangjiang Mengku, but the factory-to-company handover is not
+#     evidenced in the fixtures. Held back for owner review.
+
+version: 1
+producers:
+  # ---------------------------------------------------------------- Yunnan --
+  - canonical: "Menghai Tea Factory"
+    aliases:
+      - "Da Yi (Menghai Tea Factory)"
+      - "Menghai Tea Factory (Da Yi Brand)"
+      - "Dayi"
+      - "Da Yi"
+      - "Menghai Dayi"
+      - "Menghai Da Yi"
+      - "Dayi Menghai"
+      - "Taetea"
+      - "Menghai Tea Co."
+      - "Menghai Tea Co., Ltd."
+      - "Yunnan Menghai Tea Factory"
+      - "Menghai Cha Chang"
+      - "Menghaichachang"
+      - "勐海茶厂"
+      - "勐海茶廠"
+      - "勐海茶业"
+      - "勐海茶業"
+      - "大益"
+      - "大益茶"
+    notes: >-
+      Dayi (大益) / TAETEA is the trademark of Menghai Tea Factory, now Menghai
+      Tea Co. under TAETEA Group: one producer. TRAP, deliberately excluded:
+      bare "Menghai" / "勐海". It is the county, home to many other factories
+      that appear in this data: Menghai Tian Di Ren, Yi Pin Tang "of
+      Menghai", Chunhai "of Menghai", Xinghai, Nan Qiao, Menghai Yunhe,
+      Honghai "near Menghai". Fixture titles such as "2004 Menghai Bamboo Leaf
+      ..." (vendor "Other Factories") and white2tea "2008 Menghai Raw Puer" use
+      it as a place. The schema example lists "Menghai" as an alias; this file
+      deliberately departs from that. Also excluded: the "Menghai <X> Tea
+      Factory" names, which are different producers.
+    evidence:
+      - "YS Producer tag 'Da Yi (Menghai Tea Factory)' (yunnan_sourcing_us/com cassettes)"
+      - "YS Producer tag 'Menghai Tea Factory (Da Yi Brand)' (yunnan_sourcing_us cassette)"
+      - "YS vendor field 'Menghai Tea Factory'"
+      - "YS title '2019 Menghai DaYi \"Yi Yuan Su\" Ripe Pu-erh Tea Cake'"
+      - "Steepster tasting notes 'a Dayi ripe', 'Dayi 2011 Centennial Shou'"
+      - "domain knowledge (hanzi, TAETEA)"
+
+  - canonical: "CNNP"
+    aliases:
+      - "China National Native Produce"
+      - "China National Native Produce & Animal By-Products Import & Export Corporation"
+      - "中国土产畜产进出口公司"
+      - "中國土產畜產進出口公司"
+    notes: >-
+      Umbrella entry: China National Native Produce & Animal By-Products I/E
+      Corp. YS's plain "CNNP" tag covers Yunnan pu-erh (7262, 7581, Green
+      Mark, "Lincang Yellow Mark"), which may have been pressed by more than
+      one factory. The Hunan branch is a separate canonical (see "CNNP
+      Hunan"). TRAP, deliberately excluded: Zhongcha / 中茶 / COFCO, a
+      trademark spread across several entities (see file header). Also
+      excluded: "CNNP Yunnan" / "中茶云南", so a later split into branches
+      stays possible.
+    evidence:
+      - "YS Producer tag + vendor field 'CNNP' (yunnan_sourcing_us/com cassettes, yunnan_sourcing_us golden)"
+      - "YS title '2003 CNNP \"Lincang Yellow Mark\" Ripe Pu-erh Tea Cake'"
+      - "domain knowledge"
+
+  - canonical: "CNNP Hunan"
+    aliases:
+      - "CNNP (Hunan)"
+      - "Hunan CNNP"
+      - "中茶湖南"
+    notes: >-
+      Hunan provincial branch of CNNP / China Tea (hei cha, fu zhuan, hei
+      zhuan). Kept separate from the umbrella "CNNP" entry on purpose. TRAP:
+      vendor field "COFCO" appears on one product whose Producer tag is
+      "CNNP (Hunan)". COFCO is the parent conglomerate, so it is NOT aliased
+      here or anywhere else.
+    evidence:
+      - "YS Producer tag 'CNNP (Hunan)' (yunnan_sourcing_com cassette)"
+      - "YS vendor field 'CNNP Hunan'"
+      - "YS title '2007 CNNP \"Black and Gold Hei Zhuan\" Brick Tea of Hunan'"
+
+  - canonical: "Xiaguan Tea Factory"
+    aliases:
+      - "The Xiaguan Tea Factory"
+      - "Xia Guan Tea Factory"
+      - "Xiaguan Tuocha Group"
+      - "Xiaguan Tuo Cha Group"
+      - "Yunnan Xiaguan Tuocha Group"
+      - "Yunnan Xiaguan Tuocha (Group) Co., Ltd."
+      - "Dali Xiaguan Tea Factory"
+      - "下关茶厂"
+      - "下關茶廠"
+      - "下关沱茶集团"
+      - "下關沱茶集團"
+      - "云南下关沱茶（集团）股份有限公司"
+      - "雲南下關沱茶（集團）股份有限公司"
+    notes: >-
+      Xiaguan Tea Factory was restructured as Yunnan Xiaguan Tuocha (Group) in
+      1994. It is the same producing lineage, so the group names are aliases.
+      TRAPS, deliberately excluded: bare "Xiaguan" / "下关", a town in Dali
+      (Steepster: "the edge of the Xiaguan mountain range in Dali"); and bare
+      "Xiaguan Tuocha" / "Xiaguan Tuo Cha" / "下关沱茶", which name a product
+      style and appear in titles like '2024 Xiaguan "Raw Mini Tuo Cha"'. If
+      the owner wants pre-1994 and post-1994 output kept apart, split this
+      entry; nothing downstream has merged on it yet.
+    evidence:
+      - "YS Producer tag + vendor field 'Xiaguan Tea Factory' (yunnan_sourcing_us/com cassettes)"
+      - "Steepster crimson-lotus-tea pages 'The Xiaguan Tea Factory'"
+      - "domain knowledge (1994 group restructure, hanzi)"
+
+  - canonical: "Yunnan Changtai Tea Industry Group"
+    aliases:
+      - "Changtai Brand"
+      - "Changtai"
+      - "Chang Tai"
+      - "Changtai Group"
+      - "Changtai Tea Group"
+      - "Chang Tai Hao"
+      - "Changtaihao"
+      - "昌泰"
+      - "昌泰集团"
+      - "昌泰集團"
+      - "云南昌泰茶业集团"
+      - "雲南昌泰茶業集團"
+      - "昌泰号"
+      - "昌泰號"
+    notes: >-
+      Changtai (昌泰) Group is based in Yiwu. 昌泰号 is its own house mark.
+      TRAP: "Chang Da Hao" (a separate YS Producer tag, its own entry below)
+      is a different producer. Its trigram similarity to "Chang Tai Hao" is
+      high, so it must never be merged by fuzzy match. Crimson Lotus resells
+      Changtai cakes under Shopify vendor "Crimson Lotus Tea", so the vendor
+      fallback misattributes those to Crimson Lotus. That is a mapper issue,
+      not an alias issue.
+    evidence:
+      - "YS Producer tag + vendor field 'Changtai Brand' (yunnan_sourcing_us cassette + golden)"
+      - "Steepster crimson-lotus-tea description 'prepared by the Yunnan Changtai Tea Industry Group'"
+      - "crimson_lotus title '2003 Changtai \"Ji Nian / Memorial\" Sheng / Raw Tuo Cha (100g)'"
+
+  - canonical: "Haiwan Tea Factory"
+    aliases:
+      - "Hai Wan Tea Factory"
+      - "Haiwan Tea Factory (Lao Tong Zhi)"
+      - "Lao Tong Zhi"
+      - "Laotongzhi"
+      - "Lao Tong Zhi Brand"
+      - "Yunnan Haiwan Tea Industry"
+      - "海湾茶厂"
+      - "海灣茶廠"
+      - "老同志"
+    notes: >-
+      Lao Tong Zhi (老同志) is Haiwan's trademark: one producer. TRAPS: bare
+      "Haiwan" / "海湾" also means "bay/gulf" and is a place name, so it is
+      excluded. Haiwan was founded by Zou Bingliang, a former Menghai Tea
+      Factory director; that does NOT make it Menghai. The fixtures contain no
+      Haiwan or LTZ strings; this entry is seeded for coming TeaDB and Reddit
+      ingest.
+    evidence:
+      - "domain knowledge"
+
+  - canonical: "Shuangjiang Mengku Tea Factory"
+    aliases:
+      - "Shuang Jiang Meng Ku Tea Factory"
+      - "Shuangjiang Mengku Tea Co."
+      - "Shuangjiang Mengku Tea Co., Ltd."
+      - "双江勐库茶厂"
+      - "雙江勐庫茶廠"
+      - "双江勐库茶叶有限责任公司"
+      - "雙江勐庫茶葉有限責任公司"
+    notes: >-
+      TRAPS, deliberately excluded: bare "Mengku" / "勐库" and "Shuangjiang
+      Mengku", which name a town and county area (e.g. 'Mengku "Big Snow
+      Mountain" Black Tea', '2025 Yunnan Sourcing "Mengku Gu Shu Bai Cha"', a
+      Crimson Lotus "Mini Mengku Cake"). Mengku Rongshi / 勐库戎氏 is held
+      back (see file header).
+    evidence:
+      - "YS Producer tag + vendor field 'Shuangjiang Mengku Tea Factory' (yunnan_sourcing_com cassette)"
+      - "YS title '2006 Mengku \"Ripe Tuo\" Ripe Pu-erh Tea Tuo'"
+
+  - canonical: "Liming Tea Factory"
+    aliases:
+      - "Li Ming Tea Factory"
+      - "Xishuangbanna Liming Tea Factory"
+      - "黎明茶厂"
+      - "黎明茶廠"
+    notes: >-
+      TRAP: bare "Liming" is a place (Liming farm, Xishuangbanna) and is
+      excluded. Evidence: '2005 Nan Qiao "Liming Impression"' is a Nan Qiao
+      product, not a Liming one.
+    evidence:
+      - "YS Producer tag + vendor field 'Liming Tea Factory' (yunnan_sourcing_us/com cassettes)"
+      - "YS title '2005 Nan Qiao \"Liming Impression\" Raw Pu-erh Tea Cake'"
+
+  - canonical: "Xinghai Tea Factory"
+    aliases:
+      - "Xinghai"
+      - "Xing Hai"
+      - "Xing Hai Tea Factory"
+      - "Menghai Xinghai Tea Factory"
+      - "兴海茶厂"
+      - "興海茶廠"
+    notes: >-
+      Xinghai is a Menghai-county factory and is NOT Menghai Tea Factory. Bare
+      "Xinghai" is a trade name here; the Qinghai county of the same name is
+      not a tea origin. The fixtures pair it with a toponym, as in '2005
+      Xinghai "Lao Ban Zhang"'; Lao Ban Zhang is the village.
+    evidence:
+      - "YS Producer tag + vendor field 'Xinghai Tea Factory' (yunnan_sourcing_us/com cassettes)"
+      - "YS title '2005 Xinghai \"Lao Ban Zhang\" Ripe Pu-erh Tea Cake'"
+
+  - canonical: "Nan Qiao Tea Factory"
+    aliases:
+      - "Nanqiao Tea Factory"
+      - "Menghai Nanqiao Tea Factory"
+      - "南峤茶厂"
+      - "南嶠茶廠"
+    notes: >-
+      TRAP: bare "Nanqiao" / "Nan Qiao" / "南峤" is excluded because 南峤 is
+      the pre-1950s name of Menghai county itself.
+    evidence:
+      - "YS Producer tag + vendor field 'Nan Qiao Tea Factory' (yunnan_sourcing_com cassette)"
+      - "YS title '2005 Nan Qiao \"Liming Impression\" Raw Pu-erh Tea Cake'"
+
+  - canonical: "Chunhai Tea Factory"
+    aliases:
+      - "Chunhai"
+      - "Chun Hai"
+      - "Chun Hai Tea Factory"
+      - "Menghai Chunhai Tea Factory"
+      - "春海茶厂"
+      - "春海茶廠"
+    notes: "Menghai-county factory, distinct from Menghai Tea Factory (title says 'of Menghai' as location)."
+    evidence:
+      - "YS Producer tag + vendor field 'Chunhai Tea Factory' (yunnan_sourcing_us/com cassettes)"
+      - "YS title '2010 Chunhai \"Jin Ya\" Ripe Pu-erh Tea Cake of Menghai'"
+
+  - canonical: "Menghai Tian Di Ren Tea Factory"
+    aliases:
+      - "Tian Di Ren"
+      - "Tiandiren"
+      - "Tian Di Ren Tea Factory"
+      - "Tiandiren Tea Factory"
+      - "勐海天地人茶厂"
+      - "勐海天地人茶廠"
+    notes: >-
+      Distinct from Menghai Tea Factory, despite its own '7572' recipe-code
+      cake ('2003 Tian Di Ren "7572"'). That code is a Dayi recipe number, and
+      the attribute guard must not read it as a producer signal. Bare 天地人
+      ("heaven-earth-man") is a generic phrase and is excluded.
+    evidence:
+      - "YS Producer tag 'Menghai Tian Di Ren Tea Factory' (yunnan_sourcing_us/com cassettes)"
+      - "YS title '2003 Tian Di Ren “7572” Ripe Pu-erh Tea Cake'"
+
+  - canonical: "Yi Pin Tang Tea Factory"
+    aliases:
+      - "Yi Pin Tang Tea Factory of Menghai"
+      - "YiPinTang"
+      - "Yi Pin Tang"
+      - "Menghai Yi Pin Tang Tea Factory"
+      - "勐海一品堂茶厂"
+      - "勐海一品堂茶廠"
+    notes: >-
+      Menghai-county factory, NOT Menghai Tea Factory. Bare 一品堂 is excluded
+      because it is a common shop name across China and Taiwan.
+    evidence:
+      - "YS Producer tag 'Yi Pin Tang Tea Factory of Menghai' + vendor field 'YiPinTang' (yunnan_sourcing_us cassette)"
+      - "YS title '2006 YiPinTang \"Menghai Lao Shu\" Ripe Pu-erh Tea Cake'"
+
+  - canonical: "Menghai Yunhe Tea Factory"
+    aliases:
+      - "Yunhe Tea Factory"
+      - "Yun He Tea Factory"
+      - "Menghai Yun He Tea Factory"
+    notes: >-
+      Seen only in Steepster Crimson Lotus descriptions. TRAP: NOT the same as
+      YS Producer tag "Yun He Zhen". That brand's evidenced tea is Wu Liang,
+      not Menghai, and no fixture links the two. Never merge them on trigram.
+    evidence:
+      - "Steepster crimson-lotus-tea description 'blended by the Menghai Yunhe Tea Factory'"
+
+  - canonical: "Honghai Tea Factory"
+    aliases:
+      - "Hong Hai Tea Factory"
+    notes: "Steepster: 'Honghai Tea Factory based in Man Zhen Village near Menghai'. Not Menghai Tea Factory."
+    evidence:
+      - "Steepster crimson-lotus-tea description 'Qiao Jun is part of the Honghai Tea Factory'"
+
+  - canonical: "Puer Special Tea Factory"
+    aliases:
+      - "Pu'er Special Tea Factory"
+      - "Puer Te Zhong Cha Chang"
+      - "Pu'er Te Zhong Cha Chang"
+      - "普洱特种茶厂"
+      - "普洱特種茶廠"
+    notes: >-
+      TRAP: the romanization "Te Zhong Cha Chang" (特种茶厂, "special tea
+      factory") contains the substring "Zhong Cha". It has nothing to do with
+      Zhongcha / 中茶 or CNNP, and a naive token match would pull it there.
+    evidence:
+      - "Steepster crimson-lotus-tea description 'This tea is from \"Puer Te Zhong Cha Chang\" / \"Puer Special Tea Factory\"'"
+
+  - canonical: "Hai Lang Hao"
+    aliases:
+      - "Hailanghao"
+      - "Hai Lang Hao Tea"
+      - "海浪号"
+      - "海浪號"
+    notes: "Yiwu-area private label (Chen Zhitong). Not a toponym."
+    evidence:
+      - "YS Producer tag + vendor field 'Hai Lang Hao' (yunnan_sourcing_us/com cassettes)"
+
+  - canonical: "Chang Da Hao"
+    aliases:
+      - "Changdahao"
+    notes: "TRAP: high trigram similarity to Changtai's 'Chang Tai Hao'. They are different producers and must not be merged. Hanzi left out because it is unverified."
+    evidence:
+      - "YS Producer tag + vendor field 'Chang Da Hao' (yunnan_sourcing_com cassette)"
+
+  - canonical: "Heng Tong Hao"
+    aliases:
+      - "Hengtonghao"
+    notes: "Hanzi left out because it is unverified."
+    evidence:
+      - "YS Producer tag + vendor field 'Heng Tong Hao' (yunnan_sourcing_us cassette)"
+
+  - canonical: "Yuan Shen Tea Factory"
+    aliases:
+      - "Yuanshen Tea Factory"
+    notes: "Hanzi left out because it is unverified. Bare 'Yuan Shen' is left out because it is a generic word pair."
+    evidence:
+      - "YS Producer tag + vendor field 'Yuan Shen Tea Factory' (yunnan_sourcing_us/com cassettes)"
+
+  - canonical: "Wu Liang Ling Bao"
+    aliases:
+      - "Wuliang Lingbao"
+    notes: "TRAP: bare 'Wu Liang' / 'Wuliang' is the mountain range (e.g. Steepster 'wild purple wuliang') and is excluded."
+    evidence:
+      - "YS Producer tag + vendor field 'Wu Liang Ling Bao' (yunnan_sourcing_com cassette)"
+
+  - canonical: "Yun He Zhen"
+    aliases:
+      - "Yunhezhen"
+    notes: "TRAP: not 'Menghai Yunhe Tea Factory' (see that entry). Hanzi left out because it is unverified."
+    evidence:
+      - "YS Producer tag 'Yun He Zhen' (yunnan_sourcing_com/us cassettes)"
+
+  - canonical: "Lao Man'e Brand"
+    aliases:
+      - "Lao Man’e Brand"
+      - "Lao Man E Brand"
+      - "Laomane Brand"
+      - "Lao Mane Brand"
+    notes: >-
+      TRAP: bare "Lao Man'e" / "Lao Man'E" / "老曼峨" is a Bulang village.
+      Crimson Lotus titles use it that way ('2024 Spring Lao Man'E Gushu
+      ...', '... Huang Pian Brick from Lao Man'E'), so it is excluded. Only
+      the "Brand" forms are aliased. The curly-apostrophe variant is listed
+      because _producer_norm does not fold apostrophes.
+    evidence:
+      - "YS Producer tag + vendor field \"Lao Man'e Brand\" (yunnan_sourcing_us/com cassettes)"
+      - "crimson_lotus title \"2024 Spring Lao Man'E Gushu  Sheng / Raw Puerh Tea - 200g Cake\""
+
+  - canonical: "Zu Xiang Tea Factory"
+    aliases:
+      - "Zu Xiang"
+      - "Zuxiang"
+      - "Zuxiang Tea Factory"
+      - "祖祥"
+    notes: "Pu'er organic producer. Medium confidence on the hanzi 祖祥; drop it if the owner can't verify."
+    evidence:
+      - "YS Producer tag + vendor field 'Zu Xiang Tea Factory' (yunnan_sourcing_us/com cassettes)"
+      - "domain knowledge (hanzi)"
+
+  - canonical: "Fei Tai"
+    aliases:
+      - "Feitai"
+    notes: "YS titles abbreviate it as 'FT' ('FT 28 Years Aged ...'), but the two-letter alias is excluded (header rule 4). Hanzi left out because it is unverified."
+    evidence:
+      - "YS Producer tag + vendor field 'Fei Tai' (yunnan_sourcing_us/com cassettes)"
+      - "YS title 'FT \"30 Years Aged\" Ripe Loose Leaf Pu-erh Tea'"
+
+  - canonical: "Fuhai Tea Factory"
+    aliases:
+      - "Fu Hai Tea Factory"
+      - "Menghai Fuhai Tea Factory"
+      - "福海茶厂"
+      - "福海茶廠"
+    notes: >-
+      Menghai-county factory, NOT Menghai Tea Factory. The fixtures contain no
+      Fuhai strings; this entry is seeded for TeaDB and Reddit ingest. Bare
+      "Fuhai" is excluded because it is unevidenced and is also a county name.
+    evidence:
+      - "domain knowledge"
+
+  # ----------------------------------------------------------- Hunan / Anhua --
+  - canonical: "Bai Sha Xi Tea Factory"
+    aliases:
+      - "Bai Sha Xi"
+      - "Baishaxi"
+      - "Baishaxi Tea Factory"
+      - "Hunan Baishaxi Tea Factory"
+      - "白沙溪"
+      - "白沙溪茶厂"
+      - "白沙溪茶廠"
+    notes: >-
+      FLAG: 白沙溪 is also a stream in Anhua. It is aliased anyway because YS
+      uses the bare form as the Producer tag and the fixtures never use it as
+      a tea-origin label. The owner may want to drop the bare forms ("Bai Sha
+      Xi", "Baishaxi", "白沙溪").
+    evidence:
+      - "YS Producer tag + vendor field 'Bai Sha Xi' (yunnan_sourcing_us/com cassettes)"
+      - "YS title '2012 Bai Sha Xi \"Anhua Te Zhi\" Hua Zhuan Tea from Hunan'"
+
+  - canonical: "Gao Jia Shan Tea Factory"
+    aliases:
+      - "Gao Jia Shan"
+      - "Gaojiashan"
+      - "Gaojiashan Tea Factory"
+      - "高家山"
+      - "高家山茶业"
+      - "高家山茶業"
+    notes: >-
+      Anhua hei cha producer. FLAG: 高家山 is also the hill the company is
+      named after. It is aliased for the same reason as Bai Sha Xi, and the
+      owner may want to drop the bare forms for the same reason.
+    evidence:
+      - "YS Producer tag + vendor field 'Gao Jia Shan' (yunnan_sourcing_us/com cassettes)"
+      - "YS title '2013 Gao Jia Shan \"Waffle Cut\" Qian Liang Hei Cha Tea'"
+
+  - canonical: "Cha Yu Lin"
+    aliases:
+      - "Chayulin"
+    notes: "Anhua Tian Jian / Fu Cha producer. Hanzi left out because it is unverified."
+    evidence:
+      - "YS Producer tag + vendor field 'Cha Yu Lin' (yunnan_sourcing_us/com cassettes)"
+
+  # --------------------------------------------------------------- Guangxi --
+  - canonical: "Wuzhou Tea Factory"
+    aliases:
+      - "Three Cranes Brand (Wuzhou Tea Factory)"
+      - "Three Cranes Brand Liu Bao"
+      - "Three Cranes Brand"
+      - "Three Cranes"
+      - "San He"
+      - "Sanhe"
+      - "Wu Zhou Tea Factory"
+      - "Guangxi Wuzhou Tea Factory"
+      - "三鹤"
+      - "三鶴"
+      - "梧州茶厂"
+      - "梧州茶廠"
+    notes: >-
+      Three Cranes (三鹤) is the Wuzhou Tea Factory Liu Bao trademark, and YS
+      tags it as one producer. TRAP: bare "Wuzhou" / "梧州" is a city and is
+      excluded. Not checked: the fixtures don't show whether the Three Cranes
+      mark was historically registered to CNNP Guangxi. Even if it was, it is
+      NOT aliased to CNNP (see the Zhongcha note in the file header).
+    evidence:
+      - "YS Producer tag 'Three Cranes Brand (Wuzhou Tea Factory)' (yunnan_sourcing_us cassette + golden)"
+      - "YS Producer tag 'Three Cranes Brand Liu Bao' (yunnan_sourcing_us cassette)"
+      - "YS title '2020 Three Cranes \"1815 Recipe\" Liu Bao Tea Brick'"
+
+  # ------------------------------------------------- Western vendor brands --
+  - canonical: "Yunnan Sourcing Brand Tea"
+    aliases:
+      - "Yunnan Sourcing Brand"
+      - "Yunnan Sourcing Brand Pu-erh"
+      - "Yunnan Sourcing Brand Certified Organic Teas"
+    notes: >-
+      The IN-HOUSE pressing brand only. TRAP, deliberately excluded: the
+      retailer strings "Yunnan Sourcing Tea Shop" (346 third-party products),
+      "Yunnan Sourcing USA", "Yunnan Sourcing China", bare "Yunnan Sourcing",
+      and Steepster/Reddit "YS". Each of these can mean "sold by YS" rather
+      than "pressed by YS". Medium confidence on "... Certified Organic Teas":
+      it is a single vendor-field product with no Producer tag.
+    evidence:
+      - "YS Producer tag 'Yunnan Sourcing Brand Tea' (yunnan_sourcing_us/com cassettes + golden)"
+      - "YS Producer tag 'Yunnan Sourcing Brand' (yunnan_sourcing_us cassette)"
+      - "YS vendor field 'Yunnan Sourcing Brand Pu-erh' co-occurring with tag 'Yunnan Sourcing Brand Tea' (387 products)"
+      - "YS vendor field 'Yunnan Sourcing Brand Certified Organic Teas' (yunnan_sourcing_us cassette)"
+
+  - canonical: "white2tea"
+    aliases:
+      - "W2T"
+      - "White 2 Tea"
+      - "white2tea.com"
+      - "White2Tea Co."
+    notes: >-
+      "White2Tea" (Shopify vendor field) normalizes to the canonical, so it is
+      not listed. FLAG: the vendor-field fallback attributes everything
+      white2tea sells to white2tea, including resold teas such as '2008
+      Menghai Raw Puer'. That is a mapper issue, not an alias issue.
+    evidence:
+      - "white2tea vendor field 'white2tea' / 'White2Tea' (white2tea cassette + golden)"
+      - "Steepster tasting notes 'some 90’s HK from W2T', 'W2T Daily Drinker'"
+
+  - canonical: "Crimson Lotus Tea"
+    aliases:
+      - "Crimson Lotus"
+      - "CLT"
+      - "Crimson Lotus Tea Co."
+      - "crimsonlotustea"
+      - "crimson-lotus-tea"
+    notes: >-
+      "crimson-lotus-tea" is the Steepster company slug. Same FLAG as
+      white2tea: the vendor-field fallback attributes resold Changtai and
+      Xiaguan cakes to Crimson Lotus. Not aliased: "Printify" and "Limited"
+      (merch vendor fields).
+    evidence:
+      - "crimson_lotus vendor field 'Crimson Lotus Tea' (crimson_lotus cassette + golden)"
+      - "Steepster vendor_slug 'crimson-lotus-tea' (steepster golden)"
+      - "Steepster tasting notes 'my recent CLT order', 'from the CLT lineup'"
