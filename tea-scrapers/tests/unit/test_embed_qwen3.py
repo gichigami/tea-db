@@ -20,6 +20,7 @@ from tea_scrapers.embed import (
     FileEmbeddingStore,
     fixture_embedder,
     model_key,
+    text_hash,
 )
 from tea_scrapers.embed.cache import CacheEntry
 from tea_scrapers.embed.qwen3 import (
@@ -156,7 +157,7 @@ def test_fixture_embedder_sparse_support_follows_file(tmp_path: Path) -> None:
     key = model_key(fake)
     path = tmp_path / "dense_only.jsonl.gz"
     store = FileEmbeddingStore(path, key)
-    store.put_many(key, [CacheEntry("0" * 64, "x", Embedding(fake.embed(["x"])[0].dense))])
+    store.put_many(key, [CacheEntry(text_hash("x"), "x", Embedding(fake.embed(["x"])[0].dense))])
     store.flush()
     assert fixture_embedder(path).supports_sparse is False
     assert fixture_embedder().supports_sparse is True  # committed BGE-M3 fixture
