@@ -1,0 +1,19 @@
+# Test fixture for normalize/producer_aliases.py (ROADMAP H.2b). Same schema
+# as config/producer_aliases.yaml (owned by ontology-curator); NOT the
+# curated file — a small, hand-picked subset so loader / seeder / matcher
+# tests do not move when the curator edits the real one.
+version: 1
+producers:
+  - canonical: "Menghai Tea Factory"
+    aliases: ["Dayi", "Da Yi", "大益", "勐海茶厂", "Menghai Tea Factory (Da Yi Brand)"]
+    notes: "Dayi is the brand of the state-founded Menghai factory."
+    evidence: ["2023 Menghai \"7572\" Ripe Pu-erh Tea Cake", "steepster slug dayi"]
+  - canonical: "Xiaguan Tea Factory"
+    aliases: ["Xiaguan", "下关", "下关茶厂"]
+    evidence: ["2019 Xiaguan \"Holy Flame\" Baoyan Sheng / Raw Puerh Tea"]
+  - canonical: "white2tea"
+    aliases: ["W2T", "White 2 Tea"]
+    evidence: ["Shopify vendor field: white2tea"]
+  - canonical: "Crimson Lotus Tea"
+    aliases: ["CLT", "Crimson Lotus"]
+    evidence: ["Shopify vendor field: Crimson Lotus Tea"]

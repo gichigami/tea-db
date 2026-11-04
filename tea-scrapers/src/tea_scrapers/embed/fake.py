@@ -63,9 +63,14 @@ class FakeEmbedder:
 
 
 def fixture_embedder(path: str | Path = DEFAULT_NAME_EMBEDDING_FIXTURE) -> CachedEmbedder:
-    """Cache-only embedder over a read-only :class:`FileEmbeddingStore`."""
+    """Cache-only embedder over a read-only :class:`FileEmbeddingStore`.
+
+    ``supports_sparse`` follows the file: a dense-only model's vectors (Qwen3)
+    carry no sparse weights, and the harness then skips the sparse scorers.
+    """
     store = FileEmbeddingStore(path, read_only=True)
-    return CachedEmbedder(store, None, key=store.key, supports_sparse=True)
+    sparse = any(e.embedding.sparse is not None for e in store.entries())
+    return CachedEmbedder(store, None, key=store.key, supports_sparse=sparse)
 
 
 __all__ = ["DEFAULT_NAME_EMBEDDING_FIXTURE", "FAKE_REVISION", "FakeEmbedder", "fixture_embedder"]

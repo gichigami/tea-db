@@ -30,10 +30,18 @@ matching key; producer norm). Offline use reads the committed fixture vectors
 (``tests/fixtures/matching/name_embeddings_bge_m3.jsonl.gz``) and raises on
 any text not in them — no model download.
 
+**Option-B probes** (spec §12 hybrid entry, "H.3 Option B"): a dense-only
+embedder (Qwen3) skips the sparse scorers; :class:`TruncatedEmbedder` gives
+MRL views (first ``d`` components, re-normalized) of one stored vector set;
+``augment="append"|"replace"`` runs every scorer — trigram included — on a
+hanzi→pinyin transliterated text (:func:`pinyin_augment`; ``pypinyin`` is
+imported only here, in the experiment path). The h2 gate's producer
+resolution is never augmented: the gate stays the live V1 one.
+
 CLI::
 
     python -m tea_scrapers.eval.embedding_eval [--vectors PATH] [--database-url URL]
-        [--confidence all|high|low] [--json OUT]
+        [--confidence all|high|low] [--augment append|replace] [--dim D] [--json OUT]
 """
 
 from __future__ import annotations
@@ -41,6 +49,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -48,7 +57,9 @@ from typing import Literal
 
 from tea_scrapers.embed.base import (
     Embedder,
+    Embedding,
     dense_cosine,
+    l2_normalize,
     normalize_embed_text,
     sparse_cosine,
 )
@@ -80,6 +91,77 @@ SECONDARY_PRECISION = 0.90
 SECONDARY_KEY = f"max_recall_with_precision_ge_{SECONDARY_PRECISION}"
 
 Kind = Literal["dense", "sparse"]
+AugmentMode = Literal["append", "replace"]
+AUGMENT_MODES: tuple[str, ...] = ("append", "replace")
+
+# CJK Unified Ideographs + Ext. A + compatibility block (what product names use).
+_HAN_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+")
+_WS_RE = re.compile(r"\s+")
+
+
+def pinyin_augment(text: str, mode: AugmentMode = "append") -> str:
+    """Hanzi → toneless pinyin, syllables space-separated (``大红袍`` → ``da hong pao``).
+
+    - ``append``: original text, then the pinyin of each hanzi run appended
+      (``"2025 冰岛老寨"`` → ``"2025 冰岛老寨 bing dao lao zhai"``) — keeps the
+      hanzi signal for the model, adds the romanization the other side uses.
+    - ``replace``: hanzi replaced in place (``"2025 bing dao lao zhai"``).
+
+    Text with no hanzi is returned unchanged (so most pairs are unaffected).
+    Experiment path only — ``pypinyin`` is imported lazily.
+    """
+    runs = _HAN_RUN_RE.findall(text)
+    if not runs:
+        return text
+    from pypinyin import Style, lazy_pinyin
+
+    if mode == "replace":
+        out = " ".join(lazy_pinyin(text, style=Style.NORMAL))
+    elif mode == "append":
+        out = text + " " + " ".join(" ".join(lazy_pinyin(r, style=Style.NORMAL)) for r in runs)
+    else:
+        raise ValueError(f"unknown augment mode {mode!r}")
+    return _WS_RE.sub(" ", out).strip()
+
+
+def augmented(fn: Callable[[str], str], mode: AugmentMode | None) -> Callable[[str], str]:
+    """``fn`` followed by :func:`pinyin_augment` (identity when ``mode`` is None)."""
+    if mode is None:
+        return fn
+    return lambda s: pinyin_augment(fn(s), mode)
+
+
+class TransformedScorer:
+    """Apply a text transform to both sides, then delegate (trigram on pinyin text)."""
+
+    def __init__(self, inner: PairScorer, fn: Callable[[str], str], name: str | None = None):
+        self._inner = inner
+        self._fn = fn
+        self.name = name or inner.name
+
+    def score(self, pairs: Sequence[tuple[str, str]]) -> list[float]:
+        return self._inner.score([(self._fn(a), self._fn(b)) for a, b in pairs])
+
+
+class TruncatedEmbedder:
+    """MRL view of a dense embedder: first ``dim`` components, re-normalized.
+
+    Lets one stored full-dim vector set (Qwen3 1024-d) answer 256/512/... —
+    the same vectors ``Qwen3Embedder(dim=d)`` would produce. Dense only.
+    """
+
+    supports_sparse = False
+
+    def __init__(self, inner: Embedder, dim: int) -> None:
+        if not 0 < dim <= inner.dim:
+            raise ValueError(f"dim must be in (0, {inner.dim}], got {dim}")
+        self._inner = inner
+        self.model_name, self.revision, self.dim = inner.model_name, inner.revision, dim
+
+    def embed(self, texts: Sequence[str], *, with_sparse: bool = False) -> list[Embedding]:
+        if with_sparse:
+            raise ValueError("TruncatedEmbedder is dense-only")
+        return [Embedding(l2_normalize(e.dense[: self.dim])) for e in self._inner.embed(texts)]
 
 
 class EmbeddingScorer:
@@ -154,21 +236,27 @@ def ungated_policy(prepare: Callable[[str], str] | None = None) -> MatchPolicy:
 # ----------------------------------------------------------------------
 
 
-def collect_pair_texts(fixtures_dir: Path = DEFAULT_FIXTURES_DIR) -> list[str]:
+def collect_pair_texts(
+    fixtures_dir: Path = DEFAULT_FIXTURES_DIR,
+    augment: Sequence[AugmentMode | None] = (None,),
+) -> list[str]:
     """Every embedding text the harness can request, normalized + sorted.
 
     Product names → product key; producer-pair names and the producer hints
     on product pairs → producer key (H.5 may resolve producers by embedding).
+    ``augment`` adds the pinyin-augmented variants (``None`` = plain text).
     """
+    prod_fns = [augmented(product_embedding_text, m) for m in augment]
+    prdc_fns = [augmented(producer_embedding_text, m) for m in augment]
     texts: set[str] = set()
     for p in load_pairs(fixtures_dir / "product_pairs.jsonl"):
         for side in (p.left, p.right):
-            texts.add(normalize_embed_text(product_embedding_text(side.name)))
+            texts.update(normalize_embed_text(f(side.name)) for f in prod_fns)
             if side.producer:
-                texts.add(normalize_embed_text(producer_embedding_text(side.producer)))
+                texts.update(normalize_embed_text(f(side.producer)) for f in prdc_fns)
     for p in load_pairs(fixtures_dir / "producer_pairs.jsonl"):
         for side in (p.left, p.right):
-            texts.add(normalize_embed_text(producer_embedding_text(side.name)))
+            texts.update(normalize_embed_text(f(side.name)) for f in prdc_fns)
     return sorted(texts)
 
 
@@ -265,27 +353,39 @@ def run_comparison(
     confidence: str = "all",
     thresholds: Sequence[float] = FINE_THRESHOLDS,
     hybrid_weight: float = 0.5,
+    augment: AugmentMode | None = None,
+    producer_embedder: Embedder | None = None,
 ) -> dict[str, object]:
+    """Trigram vs dense (vs sparse, when the embedder has it) vs hybrids.
+
+    ``producer_embedder`` (default: ``embedder``) scores the producer view —
+    e.g. a Qwen3 instance with a producer-specific instruction. ``augment``
+    transliterates hanzi for every scorer (see :func:`pinyin_augment`).
+    """
     prod_pairs = load_pairs(fixtures_dir / "product_pairs.jsonl")
     prdc_pairs = load_pairs(fixtures_dir / "producer_pairs.jsonl")
     if confidence != "all":
         prod_pairs = [p for p in prod_pairs if p.label_confidence == confidence]
         prdc_pairs = [p for p in prdc_pairs if p.label_confidence == confidence]
 
-    def scorers_for(text_fn: Callable[[str], str]) -> list[PairScorer]:
-        dense = EmbeddingScorer(embedder, "dense", text_fn)
-        sparse = EmbeddingScorer(embedder, "sparse", text_fn)
-        out: list[PairScorer] = [dense, sparse]
+    def scorers_for(emb: Embedder, text_fn: Callable[[str], str]) -> list[PairScorer]:
+        text_fn = augmented(text_fn, augment)
+        dense = EmbeddingScorer(emb, "dense", text_fn)
+        sparse = EmbeddingScorer(emb, "sparse", text_fn) if emb.supports_sparse else None
+        out: list[PairScorer] = [dense] if sparse is None else [dense, sparse]
         if trigram is not None:
-            out = [trigram, *out]
-            out.append(HybridScorer([(dense, hybrid_weight), (trigram, 1 - hybrid_weight)],
+            tri = trigram if augment is None else TransformedScorer(
+                trigram, augmented(lambda s: s, augment))
+            out = [tri, *out]
+            out.append(HybridScorer([(dense, hybrid_weight), (tri, 1 - hybrid_weight)],
                                     name=f"hybrid_dense{hybrid_weight:.2f}_trigram"))
-            out.append(HybridScorer([(dense, 1.0), (sparse, 1.0), (trigram, 1.0)],
-                                    name="hybrid_dense_sparse_trigram"))
+            if sparse is not None:
+                out.append(HybridScorer([(dense, 1.0), (sparse, 1.0), (tri, 1.0)],
+                                        name="hybrid_dense_sparse_trigram"))
         return out
 
-    product_scorers = scorers_for(product_embedding_text)
-    producer_scorers = scorers_for(producer_embedding_text)
+    product_scorers = scorers_for(embedder, product_embedding_text)
+    producer_scorers = scorers_for(producer_embedder or embedder, producer_embedding_text)
     views: list[dict[str, object]] = [
         compare_scorers("product", prod_pairs, ungated_policy(), product_scorers, thresholds),
     ]
@@ -296,7 +396,10 @@ def run_comparison(
     views.append(compare_scorers("producer", prdc_pairs, v1_producer_policy(),
                                  producer_scorers, thresholds))
     return {
-        "embedder": f"{embedder.model_name}@{embedder.revision}",
+        "embedder": f"{embedder.model_name}@{embedder.revision}/{embedder.dim}d",
+        "producer_embedder": None if producer_embedder is None else (
+            f"{producer_embedder.model_name}@{producer_embedder.revision}/{producer_embedder.dim}d"),
+        "augment": augment,
         "confidence_filter": confidence,
         "status": "PRELIMINARY — agent-proposed labels; thresholds not calibrated (H.5)",
         "views": views,
@@ -317,7 +420,8 @@ FOCUS_CATEGORIES = (
 def render_comparison(result: Mapping[str, object]) -> str:
     lines = [
         f"# {result['status']}",
-        f"# embedder={result['embedder']} confidence={result['confidence_filter']}",
+        f"# embedder={result['embedder']} confidence={result['confidence_filter']} "
+        f"augment={result.get('augment')}",
         "",
     ]
     views = result["views"]
@@ -370,14 +474,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--confidence", choices=("all", "high", "low"), default="all")
     ap.add_argument("--hybrid-weight", type=float, default=0.5,
                     help="dense weight in the dense⊕trigram blend (trigram gets 1-w)")
+    ap.add_argument("--augment", choices=AUGMENT_MODES, default=None,
+                    help="hanzi→pinyin transliteration for every scorer (needs pypinyin)")
+    ap.add_argument("--dim", type=int, default=None, help="MRL-truncate dense vectors")
     ap.add_argument("--json", type=Path)
     args = ap.parse_args(argv)
     trigram = CachedScorer(TrigramScorer(args.database_url)) if args.database_url else None
     if trigram is None:
         print("note: no database URL — trigram / hybrid / h2 view skipped", file=sys.stderr)
+    emb: Embedder = fixture_embedder(args.vectors)
+    if args.dim is not None:
+        emb = TruncatedEmbedder(emb, args.dim)
     result = run_comparison(
-        fixture_embedder(args.vectors), trigram=trigram, fixtures_dir=args.fixtures_dir,
-        confidence=args.confidence, hybrid_weight=args.hybrid_weight,
+        emb, trigram=trigram, fixtures_dir=args.fixtures_dir,
+        confidence=args.confidence, hybrid_weight=args.hybrid_weight, augment=args.augment,
     )
     print(render_comparison(result))
     if args.json:
