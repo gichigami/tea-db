@@ -49,6 +49,7 @@ from tea_scrapers.normalize.canonical import (
     CanonicalMatcher,
     ProductDecision,
 )
+from tea_scrapers.normalize.producer_aliases import AliasTable, seed_producer_aliases
 from tea_scrapers.normalize.shopify_mapper import (
     ProductFields,
     map_payload_to_products,
@@ -92,6 +93,12 @@ class NormalizeStats:
     # confident non-match, unlike ``ambiguous_created``).
     guard_vetoes: int = 0
     guard_vetoes_by_reason: dict[str, int] = field(default_factory=dict)
+    # Curated producer-alias seeding at run start (ROADMAP H.2b). Zero when
+    # no alias file was configured.
+    alias_seed_inserted: int = 0
+    alias_seed_updated: int = 0
+    alias_seed_keys_added: int = 0
+    alias_seed_conflicts: int = 0
     tier_promoted_a: int = 0
     tier_demoted_b: int = 0
     tier_demoted_c: int = 0
@@ -130,6 +137,7 @@ class SilverNormalizer:
         batch_size: int = 500,
         log: structlog.stdlib.BoundLogger | None = None,
         vendor_configs: dict[str, VendorConfig] | None = None,
+        producer_aliases: AliasTable | None = None,
     ) -> None:
         self._since = since
         self._tracker = tracker
@@ -142,6 +150,10 @@ class SilverNormalizer:
         # production YAML-loaded dict. Fall back to lazy-load on first use.
         self._vendor_configs = vendor_configs
         self._matcher = CanonicalMatcher(log=self._log)
+        # Curated alias table seeded into ``producer.aliases`` before the
+        # first batch. ``None`` = no seeding (tests, ad-hoc runs); the CLI
+        # loads + validates ``config/producer_aliases.yaml`` when it exists.
+        self._producer_aliases = producer_aliases
         # Vendor row cache: source_key → vendor_id.
         self._vendor_cache: dict[str, int] = {}
         # Touched product IDs for the tier-assignment sweep.
@@ -153,6 +165,8 @@ class SilverNormalizer:
 
     def run(self) -> NormalizeStats:
         stats = NormalizeStats()
+        if self._producer_aliases is not None:
+            self._seed_aliases(self._producer_aliases, stats)
         for batch in self._iter_bronze_batches():
             try:
                 self._process_batch(batch, stats)
@@ -201,6 +215,10 @@ class SilverNormalizer:
             by_decision=stats.by_decision,
             guard_vetoes=stats.guard_vetoes,
             guard_vetoes_by_reason=stats.guard_vetoes_by_reason,
+            alias_seed_inserted=stats.alias_seed_inserted,
+            alias_seed_updated=stats.alias_seed_updated,
+            alias_seed_keys_added=stats.alias_seed_keys_added,
+            alias_seed_conflicts=stats.alias_seed_conflicts,
             tier_promoted_a=stats.tier_promoted_a,
             tier_demoted_b=stats.tier_demoted_b,
             tier_demoted_c=stats.tier_demoted_c,
@@ -208,6 +226,22 @@ class SilverNormalizer:
             by_source=stats.by_source,
         )
         return stats
+
+    def _seed_aliases(self, table: AliasTable, stats: NormalizeStats) -> None:
+        """Seed the curated aliases in their own transaction (idempotent).
+
+        Conflicts (curated spellings already split across several producer
+        rows) are recorded on the run as errors for operator review; the
+        seeder never merges rows.
+        """
+        with self._session_factory() as session:
+            seed = seed_producer_aliases(session, table)
+        stats.alias_seed_inserted = seed.inserted
+        stats.alias_seed_updated = seed.updated
+        stats.alias_seed_keys_added = seed.keys_added
+        stats.alias_seed_conflicts = len(seed.conflicts)
+        for c in seed.conflicts:
+            self._tracker.record_error(f"producer_alias_seed.conflict: {c}")
 
     # ------------------------------------------------------------------
     # Bronze iteration

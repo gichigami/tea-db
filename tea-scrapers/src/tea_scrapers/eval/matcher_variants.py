@@ -63,6 +63,7 @@ from tea_scrapers.eval.matcher_eval import (
 )
 from tea_scrapers.eval.pairs import LabeledPair, load_pairs
 from tea_scrapers.normalize.attributes import (
+    ONE_SIDED_POLICY,
     GuardAttributes,
     OneSidedPolicy,
     check_attribute_guard,
@@ -196,8 +197,6 @@ def decide_product(
         # Live matcher: the SQL exact step does not run the guard.
         return Decision(None, True, False, ta, tb)
 
-    from tea_scrapers.normalize.attributes import ONE_SIDED_POLICY
-
     verdict = check_attribute_guard(
         GuardAttributes.from_name(L.name, harvest_year=L.harvest_year, weight_grams=wa),
         GuardAttributes.from_name(R.name, harvest_year=R.harvest_year, weight_grams=wb),
@@ -282,9 +281,9 @@ def _measure(
     best_t: float | None = None
     for t in FINE_THRESHOLDS:
         c, _ = counts_at(t)
-        if c.precision is not None and c.precision >= PRECISION_TARGET and c.recall is not None:
-            if best_r is None or c.recall > best_r:
-                best_r, best_t = c.recall, t
+        ok = c.precision is not None and c.precision >= PRECISION_TARGET
+        if ok and c.recall is not None and (best_r is None or c.recall > best_r):
+            best_r, best_t = c.recall, t
     vetoed = sum(1 for p, d in zip(pairs, decisions, strict=True)
                  if d.veto is not None and p.label == "match")
     return VariantResult(
@@ -350,10 +349,11 @@ def standard_variants(aliases: AliasTable | None) -> list[Variant]:
 
 
 def render(results: Sequence[dict[str, VariantResult]]) -> str:
-    lines = [
+    header = (
         f"{'variant':52s} | {'product P@.85':>13s} {'R@.85':>6s} {'R@P≥.98':>8s} {'(t)':>5s}"
         f" | {'producer P@.85':>14s} {'R@.85':>6s} {'R@P≥.98':>8s} {'(t)':>5s}"
-    ]
+    )
+    lines = [header]
 
     def f(x: float | None) -> str:
         return "  -  " if x is None else f"{x:.3f}"

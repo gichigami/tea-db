@@ -10,9 +10,11 @@ Exit codes (per spec §7): 0 success, 1 partial failure, 2 terminal failure.
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 
 import click
 import structlog
+import yaml
 from sqlalchemy.exc import InterfaceError, OperationalError
 from ulid import ULID
 
@@ -27,6 +29,11 @@ from tea_scrapers.http.client import HttpClient
 from tea_scrapers.load import BronzeLoader
 from tea_scrapers.logging import configure_logging
 from tea_scrapers.normalize import ProductDecision, SilverNormalizer
+from tea_scrapers.normalize.producer_aliases import (
+    DEFAULT_ALIAS_PATH,
+    AliasTable,
+    load_producer_aliases,
+)
 from tea_scrapers.sources import ShopifyScraper, SteepsterScraper
 from tea_scrapers.sources.steepster import SOURCE_KEY as STEEPSTER_SOURCE_KEY
 from tea_scrapers.storage.raw import JsonlWriter
@@ -306,15 +313,46 @@ def load_cmd(ctx: click.Context, since: str) -> None:
     show_default=True,
     help="Bronze rows per transaction.",
 )
+@click.option(
+    "--producer-aliases",
+    "producer_aliases",
+    default=str(DEFAULT_ALIAS_PATH),
+    show_default=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Curated producer-alias YAML seeded into producer.aliases before matching "
+    "(skipped with a log line if the file does not exist).",
+)
 @click.pass_context
 def normalize_cmd(
-    ctx: click.Context, since: str, source: str | None, batch_size: int
+    ctx: click.Context,
+    since: str,
+    source: str | None,
+    batch_size: int,
+    producer_aliases: Path,
 ) -> None:
     """Run canonical-ID matching + bronze → silver normalization."""
     try:
         since_date = dt.date.fromisoformat(since)
     except ValueError as exc:
         raise click.UsageError(f"--since must be YYYY-MM-DD: {exc}") from exc
+
+    alias_table: AliasTable | None = None
+    if producer_aliases.exists():
+        try:
+            alias_table = load_producer_aliases(producer_aliases)
+        except (ValueError, yaml.YAMLError) as exc:
+            # Malformed curated file (schema / duplicate-alias conflict;
+            # pydantic.ValidationError subclasses ValueError). Refuse to run
+            # rather than silently re-split producers the curator resolved.
+            _log.error(
+                "normalize.producer_aliases.invalid",
+                path=str(producer_aliases),
+                error=str(exc)[:500],
+            )
+            ctx.exit(2)
+            return
+    else:
+        _log.info("normalize.producer_aliases.missing", path=str(producer_aliases))
 
     run_id = str(ULID())
     try:
@@ -325,6 +363,7 @@ def normalize_cmd(
                 run_id=run_id,
                 source=source,
                 batch_size=batch_size,
+                producer_aliases=alias_table,
             )
             stats = normalizer.run()
     except (OperationalError, InterfaceError) as exc:

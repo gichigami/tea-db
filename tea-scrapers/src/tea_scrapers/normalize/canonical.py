@@ -6,8 +6,17 @@ The product matcher follows the 4-step ladder from §8:
    weight_grams)`` — using ``IS NOT DISTINCT FROM`` to make nullable
    comparisons match cleanly. Falls back to the suffix-stripped matching
    key (``SUFFIX_EXACT``) so ``"... :: Seattle Inventory"`` joins its base.
+1.5 **Skeleton exact** (ROADMAP H.2b, ``TRANSLITERATE_MATCHING_KEYS``):
+   within the same producer / year / weight block, the space- and
+   punctuation-insensitive pinyin skeleton (:mod:`translit`) of the
+   suffix-stripped name equals the query's (``"Bing Dao"`` / ``"Bingdao"``,
+   ``"Pu-erh"`` / ``"Puerh"``, ``"老班章"`` / ``"Lao Ban Zhang"``). Unlike
+   step 1, the attribute guard runs on skeleton hits (``SKELETON_EXACT``).
+   The same block scan implements the optional one-sided year / weight
+   relaxation of ``ONE_SIDED_BLOCKING`` (default: off = V1 veto).
 2. Trigram similarity ≥0.85 on ``canonical_name`` filtered by
-   ``producer_id``. Driven by the ``%`` operator with a session-scoped
+   ``producer_id`` (query text transliterated to pinyin when it contains
+   hanzi). Driven by the ``%`` operator with a session-scoped
    ``set_limit(0.85)`` so the GIN trigram index actually fires (a
    ``similarity()`` predicate would not).
 2.5 **Attribute guard** (ROADMAP H.2; :mod:`attributes`): each trigram
@@ -29,7 +38,12 @@ The product matcher follows the 4-step ladder from §8:
 
 The producer matcher is structurally similar but with three differences:
 
-- Alias-first: ``WHERE :norm = ANY(aliases)`` before canonical-name exact.
+- Alias-first: ``aliases && :keys`` before canonical-name exact, where
+  ``:keys`` is the normalized name plus (H.2b) its pinyin key when it
+  contains hanzi. Curated aliases are seeded into the same column at
+  normalize start (:mod:`producer_aliases`). Then (H.2b) a skeleton step:
+  the space/punctuation-insensitive skeleton against every stored alias and
+  canonical name — reused only when exactly one producer has it.
 - No LLM step: tie-breaks pick the lowest ``producer_id`` deterministically
   (producer_id stability matters more than perfect recall in V1).
 - Newly seen raw-form spellings (different case, accents) are appended to
@@ -52,8 +66,10 @@ from sqlalchemy.orm import Session
 
 from tea_scrapers.normalize.attributes import (
     INVENTORY_SUFFIX_PATTERN,
+    ONE_SIDED_POLICY,
     WHITESPACE_RUN_PATTERN,
     GuardAttributes,
+    OneSidedPolicy,
     check_attribute_guard,
     has_inventory_suffix,
     matching_key,
@@ -64,6 +80,12 @@ from tea_scrapers.normalize.shopify_mapper import (
     ProductFields,
     RegionHint,
     normalize_name,
+)
+from tea_scrapers.normalize.translit import (
+    SKELETON_STRIP_SQL_PATTERN,
+    has_cjk,
+    pinyin_key,
+    usable_skeleton,
 )
 from tea_scrapers.storage.models import Producer, Product, Region
 
@@ -77,12 +99,39 @@ TRIGRAM_THRESHOLD = 0.85
 AMBIGUOUS_TOP_CEILING = 0.95
 AMBIGUOUS_GAP = 0.10
 
+# ROADMAP H.2b part 1 (spec §12 hybrid sub-q #9). Hanzi → pinyin + skeleton
+# keys at match time only; stored names are never rewritten. H.1 harness
+# (``python -m tea_scrapers.eval.matcher_variants``): product recall at
+# P ≥ 0.98 0.310 → 0.406, producer 0.157 → 0.255, zero new false merges.
+TRANSLITERATE_MATCHING_KEYS = True
+
+# ROADMAP H.2b part 3 (spec §12 hybrid sub-q #7): what the product matcher
+# does when ``harvest_year`` / ``weight_grams`` is known on one side only.
+#   "veto"       — V1 ``IS NOT DISTINCT FROM`` blocking (DEFAULT, both).
+#   "exact_only" — allow the one-sided pair, but only on a (skeleton-)exact
+#                  name hit that is the UNIQUE such row and passes the guard
+#                  (``ONE_SIDED_EXACT``); never through trigram.
+# Kept at "veto" pending owner review: the evidence for weight
+# (12 ``:: Seattle Inventory`` twins whose variant has no parseable weight,
+# all labeled low-confidence) is real but thin; see the spec entry.
+ONE_SIDED_BLOCKING: dict[str, str] = {
+    "harvest_year": "veto",
+    "weight_grams": "veto",
+}
+_ONE_SIDED_BLOCKING_VALUES = frozenset({"veto", "exact_only"})
+
 
 class ProductDecision(str, Enum):
     EXACT = "exact"
     # Exact on the suffix-stripped matching key (e.g. a ``:: Seattle
     # Inventory`` re-listing joining its base listing). ROADMAP H.2.
     SUFFIX_EXACT = "suffix_exact"
+    # Same block, equal pinyin skeleton (space / punctuation / script
+    # insensitive), guard passed. ROADMAP H.2b.
+    SKELETON_EXACT = "skeleton_exact"
+    # Exact / skeleton name hit allowed across a one-sided year or weight by
+    # ``ONE_SIDED_BLOCKING = "exact_only"`` (off by default).
+    ONE_SIDED_EXACT = "one_sided_exact"
     TRIGRAM = "trigram"
     CREATED = "created"
     AMBIGUOUS_CREATED = "ambiguous_created"
@@ -142,10 +191,27 @@ class CanonicalMatcher:
     V1 cron is single-writer — see §12 OQ.
     """
 
-    def __init__(self, log: structlog.stdlib.BoundLogger | None = None) -> None:
+    def __init__(
+        self,
+        log: structlog.stdlib.BoundLogger | None = None,
+        *,
+        transliterate: bool | None = None,
+        one_sided_blocking: dict[str, str] | None = None,
+    ) -> None:
         self._log = log or structlog.get_logger(__name__)
         self._producer_cache: dict[str, int] = {}
         self._region_cache: dict[tuple[str | None, ...], int] = {}
+        self._translit = (
+            TRANSLITERATE_MATCHING_KEYS if transliterate is None else transliterate
+        )
+        blocking = {**ONE_SIDED_BLOCKING, **(one_sided_blocking or {})}
+        bad = {k: v for k, v in blocking.items() if v not in _ONE_SIDED_BLOCKING_VALUES}
+        if bad or set(blocking) != set(ONE_SIDED_BLOCKING):
+            raise ValueError(f"invalid one_sided_blocking: {blocking!r}")
+        self._one_sided = blocking
+        # product_id → block key of its suffix-stripped canonical_name.
+        # Names are immutable once created, so this never goes stale.
+        self._block_key_cache: dict[int, str | None] = {}
 
     # ------------------------------------------------------------------
     # Producer
@@ -173,18 +239,20 @@ class CanonicalMatcher:
         # we issue any ``%`` query. Idempotent; cheap to re-issue.
         self._ensure_trgm_limit(session)
 
-        # Step 1: alias hit. ``aliases`` is TEXT[]; store normalized form so
-        # we can compare via ``ANY(...)`` directly without per-row normalize.
+        # Step 1: alias hit. ``aliases`` is TEXT[] of normalized forms (plus
+        # the pinyin key of any hanzi alias), so array overlap is a direct
+        # comparison without per-row normalize.
+        keys = self._producer_keys(raw, norm)
         row = session.execute(
             text(
                 "SELECT producer_id, canonical_name, aliases "
-                "FROM producer WHERE :norm = ANY(aliases) "
+                "FROM producer WHERE aliases && CAST(:keys AS text[]) "
                 "ORDER BY producer_id ASC LIMIT 1"
             ),
-            {"norm": norm},
+            {"keys": keys},
         ).first()
         if row is not None:
-            self._maybe_append_alias(session, row.producer_id, row.aliases, norm)
+            self._maybe_append_alias(session, row.producer_id, row.aliases, keys)
             self._producer_cache[norm] = row.producer_id
             return row.producer_id
 
@@ -192,16 +260,50 @@ class CanonicalMatcher:
         row = session.execute(
             text(
                 "SELECT producer_id, canonical_name, aliases FROM producer "
-                "WHERE LOWER(canonical_name) = :norm ORDER BY producer_id ASC LIMIT 1"
+                "WHERE LOWER(canonical_name) = ANY(CAST(:keys AS text[])) "
+                "ORDER BY producer_id ASC LIMIT 1"
             ),
-            {"norm": norm},
+            {"keys": keys},
         ).first()
         if row is not None:
-            self._maybe_append_alias(session, row.producer_id, row.aliases, norm)
+            self._maybe_append_alias(session, row.producer_id, row.aliases, keys)
             self._producer_cache[norm] = row.producer_id
             return row.producer_id
 
+        # Step 2.5 (H.2b): skeleton exact against every stored alias and
+        # canonical name. Stored aliases are lower-cased already; the SQL
+        # strip pattern is shared with ``translit.skeleton_key``. Reused only
+        # when exactly one producer carries the skeleton.
+        skel = usable_skeleton(raw) if self._translit else None
+        if skel is not None:
+            rows = session.execute(
+                text(
+                    "SELECT producer_id, canonical_name, aliases FROM producer p "
+                    "WHERE regexp_replace(LOWER(p.canonical_name), :pat, '', 'g') = :skel "
+                    "   OR EXISTS (SELECT 1 FROM unnest(p.aliases) AS a "
+                    "              WHERE regexp_replace(a, :pat, '', 'g') = :skel) "
+                    "ORDER BY producer_id ASC LIMIT 2"
+                ),
+                {"pat": SKELETON_STRIP_SQL_PATTERN, "skel": skel},
+            ).all()
+            if len(rows) == 1:
+                top = rows[0]
+                self._log.info(
+                    "producer.skeleton_match", raw=raw, producer_id=top.producer_id
+                )
+                self._maybe_append_alias(session, top.producer_id, top.aliases, keys)
+                self._producer_cache[norm] = top.producer_id
+                return top.producer_id
+            if rows:
+                self._log.info(
+                    "producer.skeleton_ambiguous",
+                    raw=raw,
+                    candidates=[(r.producer_id, r.canonical_name) for r in rows],
+                )
+
         # Step 3: trigram similarity ≥ threshold. Index-driven via ``%``.
+        # A hanzi name is scored on its pinyin key (H.2b).
+        trgm_name = pinyin_key(raw) if self._translit and has_cjk(raw) else raw
         rows = session.execute(
             text(
                 "SELECT producer_id, canonical_name, aliases, "
@@ -209,7 +311,7 @@ class CanonicalMatcher:
                 "FROM producer WHERE canonical_name % :name "
                 "ORDER BY sim DESC, producer_id ASC LIMIT 5"
             ),
-            {"name": raw},
+            {"name": trgm_name},
         ).all()
         if rows:
             top = rows[0]
@@ -220,34 +322,44 @@ class CanonicalMatcher:
                     candidates=[(r.producer_id, r.canonical_name, float(r.sim)) for r in rows],
                     chosen=top.producer_id,
                 )
-            self._maybe_append_alias(session, top.producer_id, top.aliases, norm)
+            self._maybe_append_alias(session, top.producer_id, top.aliases, keys)
             self._producer_cache[norm] = top.producer_id
             return top.producer_id
 
         # Step 4: create.
-        producer = Producer(canonical_name=raw, aliases=[norm])
+        producer = Producer(canonical_name=raw, aliases=keys)
         session.add(producer)
         session.flush()
         self._producer_cache[norm] = producer.producer_id
         return producer.producer_id
+
+    def _producer_keys(self, raw: str, norm: str) -> list[str]:
+        """Normalized name + (H.2b) its pinyin key when it contains hanzi."""
+        keys = [norm]
+        if self._translit and has_cjk(raw):
+            py = pinyin_key(raw)
+            if py and py not in keys:
+                keys.append(py)
+        return keys
 
     def _maybe_append_alias(
         self,
         session: Session,
         producer_id: int,
         existing_aliases: list[str] | None,
-        new_alias: str,
+        new_aliases: list[str],
     ) -> None:
-        """Append ``new_alias`` to ``producer.aliases`` if not already present."""
+        """Append any of ``new_aliases`` not already in ``producer.aliases``."""
         current = list(existing_aliases or [])
-        if new_alias in current:
+        new = [a for a in new_aliases if a not in current]
+        if not new:
             return
         session.execute(
             text(
                 "UPDATE producer SET aliases = COALESCE(aliases, ARRAY[]::TEXT[]) "
-                "|| ARRAY[:new]::TEXT[] WHERE producer_id = :pid"
+                "|| CAST(:new AS text[]) WHERE producer_id = :pid"
             ),
-            {"new": new_alias, "pid": producer_id},
+            {"new": new, "pid": producer_id},
         )
 
     # ------------------------------------------------------------------
@@ -390,6 +502,11 @@ class CanonicalMatcher:
                 product_id=row.product_id, decision=ProductDecision.SUFFIX_EXACT
             )
 
+        # Step 1.5 (H.2b): skeleton exact + optional one-sided relaxation.
+        block_hit = self._match_in_block(fields, producer_id=producer_id, session=session)
+        if block_hit is not None:
+            return block_hit
+
         # Step 2: trigram on canonical_name filtered by producer. Producer is
         # nullable; if we have no producer hint, restrict to producer-less
         # rows so we don't cross-pollinate against rows with strong producer
@@ -419,7 +536,11 @@ class CanonicalMatcher:
             ),
             {
                 "producer_id": producer_id,
-                "name": match_name,
+                "name": (
+                    pinyin_key(match_name)
+                    if self._translit and has_cjk(match_name)
+                    else match_name
+                ),
                 "sfx": sfx,
                 "harvest_year": fields.harvest_year,
                 "weight_grams": fields.weight_grams,
@@ -532,6 +653,126 @@ class CanonicalMatcher:
         )
         return ProductMatchResult(product_id=created, decision=ProductDecision.CREATED)
 
+    def _block_key(self, name: str) -> str | None:
+        stripped = strip_inventory_suffix(name)
+        if self._translit:
+            return usable_skeleton(stripped)
+        return matching_key(stripped) or None
+
+    def _match_in_block(
+        self,
+        fields: ProductFields,
+        *,
+        producer_id: int | None,
+        session: Session,
+    ) -> ProductMatchResult | None:
+        """Step 1.5: Python-side key comparison within the producer block.
+
+        Only the skeleton needs Python (pinyin cannot run in SQL), so the
+        block — same producer, and year / weight equal or (if relaxed by
+        ``ONE_SIDED_BLOCKING``) one-sided — is fetched and compared here.
+        Blocks are small (a producer's rows for one vintage and size).
+        """
+        relax_year = self._one_sided["harvest_year"] == "exact_only"
+        relax_weight = self._one_sided["weight_grams"] == "exact_only"
+        if not self._translit and not (relax_year or relax_weight):
+            return None
+        qkey = self._block_key(fields.canonical_name)
+        if qkey is None:
+            return None
+
+        def pred(col: str, param: str, relaxed: bool) -> str:
+            base = f"{col} IS NOT DISTINCT FROM :{param}"
+            if not relaxed:
+                return base
+            return f"({base} OR {col} IS NULL OR CAST(:{param} AS integer) IS NULL)"
+
+        producer_clause = (
+            "producer_id = :producer_id" if producer_id is not None else "producer_id IS NULL"
+        )
+        rows = session.execute(
+            text(
+                "SELECT product_id, canonical_name, harvest_year, weight_grams FROM product "
+                f"WHERE {producer_clause} "
+                f"  AND {pred('harvest_year', 'harvest_year', relax_year)} "
+                f"  AND {pred('weight_grams', 'weight_grams', relax_weight)} "
+                "ORDER BY product_id ASC"
+            ),
+            {
+                "producer_id": producer_id,
+                "harvest_year": fields.harvest_year,
+                "weight_grams": fields.weight_grams,
+            },
+        ).all()
+        strict_hits, relaxed_hits = [], []
+        for r in rows:
+            if r.product_id not in self._block_key_cache:
+                self._block_key_cache[r.product_id] = self._block_key(r.canonical_name)
+            if self._block_key_cache[r.product_id] != qkey:
+                continue
+            one_sided = (
+                r.harvest_year != fields.harvest_year or r.weight_grams != fields.weight_grams
+            )
+            (relaxed_hits if one_sided else strict_hits).append(r)
+
+        query_attrs = GuardAttributes.from_name(
+            fields.canonical_name,
+            harvest_year=fields.harvest_year,
+            weight_grams=fields.weight_grams,
+        )
+
+        def guarded(cands: list, policy: dict[str, OneSidedPolicy] | None) -> list:
+            return [
+                r
+                for r in cands
+                if not check_attribute_guard(
+                    query_attrs,
+                    GuardAttributes.from_name(
+                        r.canonical_name,
+                        harvest_year=r.harvest_year,
+                        weight_grams=r.weight_grams,
+                    ),
+                    policy=policy,
+                ).vetoed
+            ]
+
+        if self._translit:
+            ok = guarded(strict_hits, None)
+            if ok:
+                self._log.info(
+                    "silver_match_skeleton",
+                    name=fields.canonical_name,
+                    producer_id=producer_id,
+                    product_id=ok[0].product_id,
+                )
+                return ProductMatchResult(
+                    product_id=ok[0].product_id, decision=ProductDecision.SKELETON_EXACT
+                )
+        if relaxed_hits and not strict_hits:
+            policy = {
+                **ONE_SIDED_POLICY,
+                **({"harvest_year": OneSidedPolicy.PASS} if relax_year else {}),
+                **({"weight_grams": OneSidedPolicy.PASS} if relax_weight else {}),
+            }
+            ok = guarded(relaxed_hits, policy)
+            if len(ok) == 1:
+                self._log.info(
+                    "silver_match_one_sided_exact",
+                    name=fields.canonical_name,
+                    producer_id=producer_id,
+                    product_id=ok[0].product_id,
+                )
+                return ProductMatchResult(
+                    product_id=ok[0].product_id, decision=ProductDecision.ONE_SIDED_EXACT
+                )
+            if len(ok) > 1:
+                self._log.info(
+                    "silver_match_one_sided_ambiguous",
+                    name=fields.canonical_name,
+                    candidates=[r.product_id for r in ok],
+                )
+        return None
+
     def _create_product(
         self,
         fields: ProductFields,
@@ -596,10 +837,12 @@ __all__ = [
     "AMBIGUOUS_GAP",
     "AMBIGUOUS_TOP_CEILING",
     "CREATED_DECISIONS",
+    "ONE_SIDED_BLOCKING",
+    "TRANSLITERATE_MATCHING_KEYS",
+    "TRIGRAM_THRESHOLD",
     "CanonicalMatcher",
     "GuardVeto",
     "ProductDecision",
     "ProductMatchResult",
-    "TRIGRAM_THRESHOLD",
     "normalize_name",
 ]

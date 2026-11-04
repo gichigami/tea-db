@@ -302,10 +302,14 @@ def test_product_trigram_reuse_same_producer(session: Session) -> None:
         region_id=None,
         session=session,
     )
-    # Either trigram reuse, or exact (because normalize_name collapses
-    # whitespace) — both are fine, and both reuse the seed row.
+    # Trigram reuse, or (H.2b) skeleton exact — "Yi Wu" / "Yiwu" share the
+    # space-insensitive key — both reuse the seed row.
     assert r_near.product_id == r_seed.product_id
-    assert r_near.decision in (ProductDecision.EXACT, ProductDecision.TRIGRAM)
+    assert r_near.decision in (
+        ProductDecision.EXACT,
+        ProductDecision.SKELETON_EXACT,
+        ProductDecision.TRIGRAM,
+    )
 
 
 def test_product_below_threshold_creates_new(session: Session) -> None:
@@ -504,8 +508,10 @@ def test_guard_veto_removes_candidate_before_ambiguity_check(session: Session) -
     """Without the guard these two candidates are ambiguous (gap < 0.10).
 
     The Raw seed is vetoed, leaving one Ripe candidate → reuse (TRIGRAM).
+    Transliteration off: with it on, "Pu-erh" / "Puerh" is a skeleton-exact
+    hit (H.2b) and the trigram + guard path under test never runs.
     """
-    matcher = CanonicalMatcher()
+    matcher = CanonicalMatcher(transliterate=False)
     tok = _digits()
     pid = _seed_producer(session)
     ripe = _seed_product(
@@ -857,8 +863,11 @@ def test_guard_name_year_fallback_vetoes_when_both_years_null(session: Session) 
 
 
 def test_guard_name_year_fallback_same_year_still_reuses(session: Session) -> None:
-    """Control: same mid-title year, spelling-only difference → trigram reuse."""
-    matcher = CanonicalMatcher()
+    """Control: same mid-title year, spelling-only difference → trigram reuse.
+
+    Transliteration off so the trigram path runs (H.2b would skeleton-match).
+    """
+    matcher = CanonicalMatcher(transliterate=False)
     tok = _digits()
     pid = _seed_producer(session)
     seed = _seed_product(

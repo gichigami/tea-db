@@ -28,6 +28,9 @@ dependencies = [
     "pyyaml>=6.0",
     "psycopg[binary]>=3.1",
     "pgvector>=0.3",
+    # Hanzi -> toneless pinyin for canonical-matcher keys only (ROADMAP H.2b;
+    # spec §12 hybrid sub-q #9). MIT, pure Python, zero deps, 0.84 MB wheel.
+    "pypinyin>=0.50,<1.0",
 ]
 
 [project.optional-dependencies]
